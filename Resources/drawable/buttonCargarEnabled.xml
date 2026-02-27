@@ -1,0 +1,11 @@
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+	<item android:state_enabled="true" android:drawable="@drawable/buttoncargar" />
+	<item>
+		<shape>
+			<solid android:color="#B3B3B3" />
+			<!-- Color gris claro para el estado deshabilitado -->
+			<corners android:radius="7dp" />
+			<padding android:left="10dp" android:top="10dp" android:right="10dp" android:bottom="10dp" />
+		</shape>
+	</item>
+</selector>

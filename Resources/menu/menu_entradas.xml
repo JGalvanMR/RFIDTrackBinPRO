@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+      xmlns:app="http://schemas.android.com/apk/res-auto">
+
+	<item
+        android:id="@+id/fletes_pendientes_entradas"
+        android:icon="@drawable/ic_pendientes_black_24dp"
+        android:title="@string/title_fletes"
+		app:showAsAction="always"/>
+	
+	
+	<item
+        android:id="@+id/inicio_entradas"
+        android:icon="@drawable/ic_timer_black_24dp"
+        android:title="@string/title_inicio"
+		app:showAsAction="always"/>
+
+	<item
+        android:id="@+id/final_entradas"
+        android:icon="@drawable/ic_timerf_black_24dp"
+        android:title="@string/title_final"
+		app:showAsAction="always" />
+
+</menu>

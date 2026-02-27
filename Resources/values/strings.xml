@@ -1,0 +1,88 @@
+<resources>
+    <string name="app_name">RFID Track Bin</string>
+    <string name="title_home">Inventario</string>
+    <string name="title_dashboard">Entradas</string>
+    <string name="title_notifications">Salidas</string>
+	<string name="title_verifications">Verificacion</string>
+	<string name="fab_description">Baja de Etiquetas</string>
+
+
+	<!--<string name="inventory">Inventory</string>
+	<string name="stop">Stop</string>
+	<string name="find">Fine Tag</string>-->
+
+
+	<string name="connectState">Disconnect</string>
+	<string name="temperature">Temperature :</string>
+	<string name="power">Power :</string>
+	<string name="profile">Profile :</string>
+	<string name="inventoryTime">Inventory Time :</string>
+	<string name="idleTime">Idle Time :</string>
+	<string name="session">Session :</string>
+	<string name="target">Target :</string>
+	<string name="qValue">Q :</string>
+	<string name="startQ">Start :</string>
+	<string name="maxQ">Max :</string>
+	<string name="minQ">Min :</string>
+	<string name="toggleTarget">Toggle Target :</string>
+	<string name="encoding">Encoding :</string>
+	<string name="algorithm">Algorithm :</string>
+	<string name="battery">Battery :</string>
+	<string name="sku">SKU :</string>
+	<string name="region">Region :</string>
+	<string name="deviceName">Device Name :</string>
+	<string name="serialNumber">SN :</string>
+	<string name="version">Version :</string>
+	<string name="powerMode">Power Mode :</string>
+	<string name="readMode">Read Mode :</string>
+	<string name="autoOffTimeList">Auto Off List :</string>
+	<string name="autoOffTime">Auto Off  :</string>
+	<string name="operatingMode">Operating Mode :</string>
+	<string name="beep">Beep :</string>
+	<string name="vibrator">Vibrator :</string>
+	<string name="time">Time :</string>
+	<string name="continuousMode">Continuous Mode :</string>
+	<string name="tari">TARI :</string>
+	<string name="blf">BLF :</string>
+	<string name="fastMode">Fast Mode :</string>
+
+	<string name="inventory">Inventory</string>
+	<string name="settings">Settings</string>
+	<string name="info">Info</string>
+	<string name="stop">Stop</string>
+	<string name="find">Fine Tag</string>
+	<string name="read">Read</string>
+	<string name="write">Write</string>
+	<string name="lock">Lock</string>
+	<string name="unlock">Unlock</string>
+	<string name="factoryReset">Factory Reset</string>
+	<string name="findDevice">Find Device</string>
+	<string name="changeOperatingMode">Change Operating Mode</string>
+	<string name="changeReadMode">Change Read Mode</string>
+
+	<string name="epc">EPC :</string>
+	<string name="rssi">RSSI :</string>
+	<string name="data">Data :</string>
+	<string name="result">Result :</string>
+	<string name="bluetoothMACAddress">Bluetooth MAC Address :</string>
+	<string name="bluetoothMACHint">ex: AA:BB:CC:DD:EE:FF</string>
+
+	<string name="display">Display Text On Screen:</string>
+	<string name="btn_display">send</string>
+
+	<string name="tid">Tag TID :</string>
+	<string name="fastId">Fast ID :</string>
+	
+	<!--EntradasFragment.xml-->
+	<string name="connectedState">Connect State :</string>
+	<string name="area">Area :</string>
+	<string name="totalCajasLeidas">Total de Cajas:</string>
+	<string name="totalAcumulado">Acumulado:</string>
+	<string name="leer">LEER</string>
+	<string name="guardar">GUARDAR</string>
+
+	<string name="title_inicio">Hora Inicial</string>
+	<string name="title_final">Hora Final</string>
+
+	<string name="title_fletes">Fletes Pendientes</string>
+</resources>

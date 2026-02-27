@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--<color name="colorPrimary">#2c3e50</color>
+    <color name="colorPrimaryDark">#1B3147</color>
+    <color name="colorAccent">#3498db</color>
+	<color name="colorAccent">#ed174f</color>-->
+	<color name="colorPrimary">#0068b3</color>
+	<color name="colorPrimaryDark">#143b57</color>
+	<color name="colorAccent">#0440B8</color>
+	<!-- Nuevo color para el FAB -->
+	<color name="purple_500">#6200EE</color>
+	<color name="white">#FFFFFF</color>
+</resources>

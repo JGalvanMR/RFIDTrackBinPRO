@@ -1,0 +1,34 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+	android:layout_height="match_parent"
+    android:background="@drawable/dialog_background"
+    android:clipToOutline="true" 
+			  android:padding="16dp">
+
+	<!-- GridView para mostrar QR leídos -->
+	<GridView
+		android:id="@+id/gvleidoBajaRFID"
+		android:gravity="center"
+		android:layout_width="match_parent"
+		android:layout_height="300dp"
+		android:horizontalSpacing="10dp"
+		android:verticalSpacing="10dp"
+		android:stretchMode="columnWidth"
+		android:numColumns="1"
+		android:minWidth="25dp"
+		android:minHeight="25dp"
+		android:layout_weight="1"
+		android:smoothScrollbar="true"
+		android:listSelector="@drawable/layerdraw"
+		android:drawSelectorOnTop="false"
+		android:columnWidth="150dp"
+		android:paddingTop="5dp"
+		android:paddingLeft="5dp"
+		android:paddingRight="5dp"
+		android:paddingBottom="5dp"
+		android:background="@drawable/gv_background" />
+
+</LinearLayout>

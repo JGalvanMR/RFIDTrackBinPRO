@@ -1,0 +1,51 @@
+<resources>
+
+	<!-- Base application theme. -->
+	<style name="AppTheme" parent="Theme.MaterialComponents.Light.NoActionBar">
+		<!-- Customize your theme here. -->
+		<item name="colorPrimary">@color/colorPrimary</item>
+		<item name="colorPrimaryDark">@color/colorPrimaryDark</item>
+		<item name="colorAccent">@color/colorAccent</item>
+		<item name="android:windowBackground">#dee2e6</item>
+
+		<item name="android:spinnerItemStyle">@style/AppTheme.Light.spinnerItem</item>
+		<item name="android:spinnerDropDownItemStyle">@style/AppTheme.Light.spinnerDropDownItem</item>
+	</style>
+
+	<style name="AppTheme.Light.spinnerItem" parent="@android:style/Widget.Material.Light.TextView.SpinnerItem">
+		<item name="android:textColor">#000000</item>
+		<item name="android:textAppearance">@android:attr/textAppearanceSmall</item>
+		<item name="android:textSize">20sp</item>
+	</style>
+	<style name="AppTheme.Light.spinnerDropDownItem" parent="@android:style/Widget.Material.Light.DropDownItem.Spinner">
+		<item name="android:background">#dee2e6</item>
+		<item name="android:textAppearance">?android:attr/textAppearanceSmall</item>
+		<item name="android:textSize">20sp</item>
+	</style>
+	<style name="AppTheme.Light.dropDownHintAppearance" parent="@android:style/TextAppearance.Widget.DropDownHint">
+		<item name="android:textAppearance">?android:attr/textAppearanceSmall</item>
+		<item name="android:textSize">20sp</item>
+	</style>
+
+	<style name="AppTheme.NoActionBar" parent="Theme.MaterialComponents.Light.NoActionBar">
+		<item name="windowActionBar">false</item>
+		<item name="windowNoTitle">true</item>
+	</style>
+
+	<style name="AppTheme.AppBarOverlay" parent="ThemeOverlay.MaterialComponents.Dark.ActionBar" />
+
+	<style name="AppTheme.PopupOverlay" parent="ThemeOverlay.MaterialComponents.Light" />
+
+	<style name="AppTheme.CustomAlertDialog" parent="Theme.MaterialComponents.Light.Dialog.Alert">
+		<!-- Fondo translúcido -->
+		<item name="android:windowBackground">@android:color/transparent</item>
+		<item name="android:backgroundDimEnabled">true</item>
+		<item name="android:backgroundDimAmount">0.5</item>
+
+		<!-- Usaremos un fondo personalizado con esquinas redondeadas -->
+		<item name="android:background">@drawable/dialog_background</item>
+	</style>
+
+
+
+</resources>

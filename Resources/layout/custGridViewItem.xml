@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AbsoluteLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bgdefault"
+    android:elevation="3dp">
+
+	<LinearLayout
+        android:id="@+id/linearLayoutHorizontal"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="6dp"
+        android:gravity="center_vertical">
+
+		<ImageView
+            android:id="@+id/imgPers"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/shuttlebin330"
+            android:scaleType="centerInside"
+            android:layout_marginEnd="6dp"/>
+
+		<LinearLayout
+            android:id="@+id/linearLayout1"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:minWidth="25dp"
+            android:minHeight="25dp">
+
+			<TextView
+                android:id="@+id/txtName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Text"
+                android:textColor="#000000"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:paddingStart="3dp"/>
+
+			<TextView
+                android:id="@+id/txtAge"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Text"
+                android:textColor="#000000"
+                android:textSize="12sp"
+                android:paddingStart="3dp"
+                android:layout_marginTop="2dp"/>
+
+		</LinearLayout>
+
+	</LinearLayout>
+
+</AbsoluteLayout>

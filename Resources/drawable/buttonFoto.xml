@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+	<item android:state_pressed="true" >
+		background-image: radial-gradient( circle 311px at 8.6% 27.9%,  rgba(62,147,252,0.57) 12.9%, rgba(239,183,192,0.44) 91.2% );
+		<shape>
+			<solid android:color="#005C97" />
+			<corners android:radius="7dp" />
+			<padding android:left="10dp" android:top="10dp" android:right="10dp"
+              android:bottom="10dp" />
+		</shape>
+	</item>
+	<item>
+		<shape>
+			<gradient android:startColor="#0051de" android:centerColor="#0063e8" android:endColor="#0051de"
+              android:angle="135" />
+			<corners android:radius="7dp" />
+			<padding android:left="10dp" android:top="10dp" android:right="10dp"
+              android:bottom="10dp" />
+		</shape>
+	</item>
+</selector>

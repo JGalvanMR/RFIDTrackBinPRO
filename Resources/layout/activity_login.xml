@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:background="@android:color/white">
+
+	<LinearLayout
+        android:orientation="vertical"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="24dp"
+        android:gravity="center_horizontal">
+
+		<!-- Logo Superior -->
+		<ImageView
+			android:layout_width="wrap_content"
+			android:layout_height="wrap_content"
+            android:src="@drawable/logosa"
+            android:scaleType="fitCenter"
+            android:adjustViewBounds="true"
+            android:layout_gravity="center"/>
+
+		<!-- Logo adicional -->
+		<ImageView
+            android:id="@+id/iVlogo"
+            android:src="@drawable/logo"
+            android:layout_width="100dp"
+            android:layout_height="100dp"
+            android:layout_gravity="center"
+            android:layout_marginTop="12dp"/>
+
+		<!-- Título -->
+		<TextView
+            android:id="@+id/tvlogin"
+            android:text="RFID Track Bin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:textColor="#222222"
+            android:textStyle="bold"
+            android:textSize="20sp"
+            android:layout_marginTop="16dp"/>
+
+		<!-- Spinner Usuario -->
+		<Spinner
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:spinnerMode="dropdown"
+				android:background="@drawable/edittext_background"
+				android:padding="12dp"
+				android:layout_marginTop="24dp"
+				android:id="@+id/sprUsuarios" />
+
+		<!-- Contraseña -->
+		<EditText
+            android:id="@+id/txtContrasena"
+            android:hint="Contraseña"
+            android:layout_width="match_parent"
+            android:layout_height="50dp"
+            android:background="@drawable/edittext_background"
+            android:padding="12dp"
+            android:layout_marginTop="16dp"
+            android:inputType="textPassword" />
+
+		<!-- Botón Ingresar -->
+		<Button
+            android:id="@+id/btnLogin"
+            android:text="Ingresar"
+            android:layout_width="match_parent"
+            android:layout_height="50dp"
+            android:layout_marginTop="24dp"
+            android:background="@drawable/button_primary"
+            android:textColor="@android:color/white"
+            android:textStyle="bold"
+            android:elevation="4dp"/>
+
+		<TextView
+			android:text="RFID Track Bin - Versión: 1.0"
+			android:textAppearance="?android:attr/textAppearanceSmall"
+			android:gravity="right"
+			android:layout_width="match_parent"
+			android:layout_height="wrap_content"
+			android:id="@+id/versionApp" />
+
+	</LinearLayout>
+</ScrollView>
