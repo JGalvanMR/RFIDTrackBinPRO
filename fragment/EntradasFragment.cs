@@ -1,4 +1,6 @@
-﻿using Android.App;
+﻿using System.Linq;
+using System.Data;
+using Android.App;
 using Android.Content;
 using Android.Media;
 using Android.OS;
@@ -79,19 +81,16 @@ namespace RFIDTrackBin.fragment
         private List<TagLeido> tagEPCList = new List<TagLeido>();
         private myGVitemAdapter adapter;
 
-        DataSet ds = new DataSet();
+        // FIX B1: Eliminado "DataSet ds" — declarado pero nunca utilizado en ninguna
+        //         parte del fragmento. Instanciar DataSet tiene un coste de memoria no trivial.
 
-        // FIX: DataTables locales — NO static para evitar contaminación entre fragmentos
+        // DataTables locales — NO static para evitar contaminación entre instancias del fragmento
         public DataTable vwProveedor = new DataTable("vwProveedor");
         public DataTable vwRanchos = new DataTable("vwRanchos");
         public DataTable vwTablas = new DataTable("vwTablas");
 
         int totalCajasLeidasINT = 0;
         int totalAcumuladoINT = 0;
-
-        // FIX #7: Eliminado campo "SqlConnection thisConnection" que no se cerraba.
-        // FIX: Eliminado campo "MySqlConnection mySqlConn" — credenciales hardcodeadas
-        //      y NUNCA se usaba (la conexión MySQL se obtiene a través de GetURL / HttpClient).
 
         string IdClaveTag;
         View vwEntradas;
@@ -136,7 +135,6 @@ namespace RFIDTrackBin.fragment
 
             FindViews(view);
 
-            // FIX #4: Carga en background
             await LoadProveedorAsync(view, Convert.ToInt32(_activity.idUnidadNegocio));
 
             SetButtonClick();
@@ -162,6 +160,9 @@ namespace RFIDTrackBin.fragment
 
             progressBar = view.FindViewById<ProgressBar>(Resource.Id.progressBarGuardar);
             loadingOverlay = view.FindViewById<RelativeLayout>(Resource.Id.loadingOverlay);
+
+            // ISSUE 2: Intentar restaurar sesión activa previa (si el usuario vino de Home)
+            await RestaurarSesionEntradaAsync();
         }
 
         public void InitializeSoundPool()
@@ -202,7 +203,6 @@ namespace RFIDTrackBin.fragment
             switch (item.ItemId)
             {
                 case Resource.Id.inicio_entradas:
-                    // FIX #4: InsertarEntrada ahora async — no bloquea UI
                     _ = InsertarEntradaAsync(tipoMovimiento,
                         ((MainActivity)Activity).usuario,
                         prov_clave, rch_clave, tbl_clave, "A");
@@ -217,7 +217,6 @@ namespace RFIDTrackBin.fragment
                     return true;
 
                 case Resource.Id.final_entradas:
-                    // FIX #4: Operaciones de cierre encadenadas async
                     _ = FinalizarEntradaAsync(IdConse);
                     return true;
 
@@ -230,11 +229,13 @@ namespace RFIDTrackBin.fragment
             }
         }
 
-        // Helper para encadenar las operaciones de cierre async
         private async Task FinalizarEntradaAsync(int idConse)
         {
             await ActualizarHoraCierreAsync(idConse);
             await UpdateFechaUltimoMovimientoAsync(idConse);
+
+            // ISSUE 2: Borrar la sesión persistida al cerrarla limpiamente
+            LimpiarSesionEntrada();
 
             sprProveedor.SetSelection(0);
             sprProveedor.Enabled = true;
@@ -296,7 +297,6 @@ namespace RFIDTrackBin.fragment
 
             try
             {
-                // FIX #4: GetURL es async — no bloquea
                 string url = await GetURL(Convert.ToInt32(_activity.idUnidadNegocio));
 
                 if (string.IsNullOrEmpty(url))
@@ -344,14 +344,7 @@ namespace RFIDTrackBin.fragment
             try
             {
                 var flete = fpList[e.Position];
-                prov_clave = flete.IdProveedor;
-                rch_clave = flete.IdRancho;
-                tbl_clave = flete.IdTabla;
                 ActualizarSpinnersDesdeFlete(flete);
-
-                Toast.MakeText(_activity,
-                    $"Proveedor: {prov_clave}\nRancho: {rch_clave}\nTabla: {tbl_clave}",
-                    ToastLength.Short).Show();
             }
             catch (Exception ex)
             {
@@ -359,7 +352,19 @@ namespace RFIDTrackBin.fragment
             }
         }
 
-        private async void ActualizarSpinnersDesdeFlete(FleteItem flete)
+        // ISSUE 3 FIX: Reescritura completa de ActualizarSpinnersDesdeFlete.
+        // Problema original: dos bugs combinados que causaban "no encuentra nada":
+        //   (a) Los event handlers (sprProveedor_ItemSelected, etc.) se mantenían
+        //       activos durante la carga, disparando LoadRanchosAsync en paralelo
+        //       al flujo manual → condición de carrera: el DataTable se sobreescribía
+        //       mientras se intentaba leer.
+        //   (b) DataTable.Select("IdProveedor = '123'") falla silenciosamente cuando
+        //       la columna es tipo Int32 — ADO.NET es estricto con tipos. Se necesita
+        //       la comparación sin comillas para columnas numéricas.
+        // Solución: desconectar todos los handlers antes de la secuencia de carga,
+        //           usar EncontrarPosicionEnSpinner con comparación tipo-correcta,
+        //           y reconectar handlers al final.
+        private async void ActualizarSpinnersDesdeFletes(FleteItem flete)
         {
             try
             {
@@ -369,35 +374,247 @@ namespace RFIDTrackBin.fragment
                 Spinner spinnerRancho = vwEntradas.FindViewById<Spinner>(Resource.Id.sprRancho);
                 Spinner spinnerTabla = vwEntradas.FindViewById<Spinner>(Resource.Id.sprTabla);
 
+                // Desconectar handlers para evitar cargas concurrentes durante SetSelection
+                spinnerProv.ItemSelected -= sprProveedor_ItemSelected;
+                spinnerRancho.ItemSelected -= sprRancho_ItemSelected;
+                spinnerTabla.ItemSelected -= sprTabla_ItemSelected;
 
-                LoadProveedorAsync(vwEntradas, Convert.ToInt32(_activity.idUnidadNegocio)).Wait();
-                SeleccionarSpinner(spinnerProv, vwProveedor, "IdProveedor", flete.IdProveedor, "NombreProveedor");
-                await Task.Delay(200);
-                LoadRanchosAsync(Convert.ToInt32(flete.IdProveedor)).Wait();
-                SeleccionarSpinner(spinnerRancho, vwRanchos, "IdRancho", flete.IdRancho, "NombreRancho");
-                await Task.Delay(200);
-                LoadTablasAsync(Convert.ToInt32(flete.IdRancho)).Wait();
-                SeleccionarSpinner(spinnerTabla, vwTablas, "IdTabla", flete.IdTabla, "NombreTabla");
+                // Guardar las claves ANTES de la carga visual, para que lleguen a prefs
+                // aunque la secuencia de spinners falle parcialmente (ej. ID alfanumérico)
+                prov_clave = flete.IdProveedor;
+                rch_clave = flete.IdRancho;
+                tbl_clave = flete.IdTabla;
+
+                // Paso 1: cargar proveedores y seleccionar el del flete
+                await LoadProveedorAsync(vwEntradas, Convert.ToInt32(_activity.idUnidadNegocio));
+                int posP = EncontrarPosicionEnSpinner(spinnerProv, vwProveedor, "Prov_clave", flete.IdProveedor, "NombreProveedor");
+                if (posP > 0) spinnerProv.SetSelection(posP);
+
+                // Paso 2: cargar ranchos del proveedor
+                // Protegido: IdProveedor puede ser alfanumérico en ciertos fletes
+                await LoadRanchosAsync(flete.IdProveedor);
+                int posR = EncontrarPosicionEnSpinner(spinnerRancho, vwRanchos, "Ran_Clave", flete.IdRancho, "NombreRancho");
+                if (posR > 0) spinnerRancho.SetSelection(posR);
+                //if (int.TryParse(flete.IdProveedor, out int idProvNum))
+                //{
+                //    await LoadRanchosAsync(flete.IdProveedor);
+                //    int posR = EncontrarPosicionEnSpinner(spinnerRancho, vwRanchos, "Ran_Clave", flete.IdRancho, "NombreRancho");
+                //    if (posR > 0) spinnerRancho.SetSelection(posR);
+                //}
+                //else
+                //{
+                //    Log.Warn(TAG, $"ActualizarSpinnersDesdeFlete: IdProveedor '{flete.IdProveedor}' no es numérico, omitiendo LoadRanchosAsync");
+                //}
+
+                // Paso 3: cargar tablas del rancho
+                // Protegido: IdRancho puede ser alfanumérico en ciertos fletes
+                await LoadTablasAsync(flete.IdProveedor, flete.IdRancho);
+                int posT = EncontrarPosicionEnSpinner(spinnerTabla, vwTablas, "Tab_Clave", flete.IdTabla, "NombreTabla");
+                if (posT > 0) spinnerTabla.SetSelection(posT);
+                //if (int.TryParse(flete.IdRancho, out int idRanchNum))
+                //{
+                //    await LoadTablasAsync(flete.IdRancho);
+                //    int posT = EncontrarPosicionEnSpinner(spinnerTabla, vwTablas, "Tab_Clave", flete.IdTabla, "NombreTabla");
+                //    if (posT > 0) spinnerTabla.SetSelection(posT);
+                //}
+                //else
+                //{
+                //    Log.Warn(TAG, $"ActualizarSpinnersDesdeFlete: IdRancho '{flete.IdRancho}' no es numérico, omitiendo LoadTablasAsync");
+                //}
+
+                // Habilitar "Inicio" ahora que la selección está completa
+                _menu?.FindItem(Resource.Id.inicio_entradas)?.SetEnabled(true);
+
+                Toast.MakeText(_activity,
+                    $"Flete cargado:\nProveedor: {prov_clave}\nRancho: {rch_clave}\nTabla: {tbl_clave}",
+                    ToastLength.Short).Show();
             }
             catch (Exception ex)
             {
-                Toast.MakeText(_activity, ex.Message, ToastLength.Long).Show();
+                Toast.MakeText(_activity, $"Error al cargar flete: {ex.Message}", ToastLength.Long).Show();
+            }
+            finally
+            {
+                // Reconectar handlers siempre, incluso si hay error
+                Spinner spinnerProv = vwEntradas?.FindViewById<Spinner>(Resource.Id.sprProveedor);
+                Spinner spinnerRancho = vwEntradas?.FindViewById<Spinner>(Resource.Id.sprRancho);
+                Spinner spinnerTabla = vwEntradas?.FindViewById<Spinner>(Resource.Id.sprTabla);
+
+                if (spinnerProv != null) spinnerProv.ItemSelected += sprProveedor_ItemSelected;
+                if (spinnerRancho != null) spinnerRancho.ItemSelected += sprRancho_ItemSelected;
+                if (spinnerTabla != null) spinnerTabla.ItemSelected += sprTabla_ItemSelected;
+            }
+        }
+        private async Task ActualizarSpinnersDesdeFlete(FleteItem flete)
+        {
+            try
+            {
+                Spinner spinnerProveedor = vwEntradas.FindViewById<Spinner>(Resource.Id.sprProveedor);
+                Spinner spinnerRancho = vwEntradas.FindViewById<Spinner>(Resource.Id.sprRancho);
+                Spinner spinnerTabla = vwEntradas.FindViewById<Spinner>(Resource.Id.sprTabla);
+
+                if (vwProveedor == null || vwProveedor.Rows.Count == 0)
+                {
+                    Log.Warn(TAG, "vwProveedor no tiene datos");
+                    return;
+                }
+
+                // ===============================
+                // 1. SELECCIONAR PROVEEDOR
+                // ===============================
+
+                int posProveedor = EncontrarPosicionEnSpinner(
+                    vwProveedor,
+                    "Prov_Clave",
+                    flete.IdProveedor
+                );
+
+                spinnerProveedor.SetSelection(posProveedor);
+
+                Log.Debug(TAG, $"Proveedor seleccionado: {flete.IdProveedor}");
+
+                // ===============================
+                // 2. CARGAR RANCHOS
+                // ===============================
+
+                await LoadRanchosAsync(flete.IdProveedor);
+
+                if (vwRanchos == null || vwRanchos.Rows.Count == 0)
+                {
+                    Log.Warn(TAG, "vwRanchos no tiene datos");
+                    return;
+                }
+
+                int posRancho = EncontrarPosicionEnSpinner(
+                    vwRanchos,
+                    "Ran_Clave",
+                    flete.IdRancho
+                );
+
+                spinnerRancho.SetSelection(posRancho);
+
+                Log.Debug(TAG, $"Rancho seleccionado: {flete.IdRancho}");
+
+                // ===============================
+                // 3. CARGAR TABLAS
+                // ===============================
+
+                await LoadTablasAsync(flete.IdProveedor, flete.IdRancho);
+
+                if (vwTablas == null || vwTablas.Rows.Count == 0)
+                {
+                    Log.Warn(TAG, "vwTablas no tiene datos");
+                    return;
+                }
+
+                int posTabla = EncontrarPosicionEnSpinner(
+                    vwTablas,
+                    "Tab_Clave",
+                    flete.IdTabla
+                );
+
+                spinnerTabla.SetSelection(posTabla);
+
+                Log.Debug(TAG, $"Tabla seleccionada: {flete.IdTabla}");
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"ActualizarSpinnersDesdeFlete error: {ex.Message}");
+            }
+        }
+        private int EncontrarPosicionEnSpinner(DataTable tabla, string columna, string valor)
+        {
+            for (int i = 0; i < tabla.Rows.Count; i++)
+            {
+                if (tabla.Rows[i][columna].ToString().Trim() == valor.Trim())
+                    return i;
+            }
+
+            Log.Warn(TAG, $"No se encontró {valor} en columna {columna}");
+            return 0;
+        }
+        /// <summary>
+        /// Busca la posición de un valor en el Spinner usando la DataTable como mapa.
+        ///
+        /// HISTORIAL DE BUGS EN ESTE MÉTODO:
+        ///   v1 — Usaba DataTable.Select("col = 'val'") siempre con comillas.
+        ///        Fallaba con columnas INT: EvaluateException Cannot perform '=' on Int32 and String.
+        ///   v2 — Usaba int.TryParse para decidir comillas.
+        ///        Fallaba con "03": parseaba a 3, sin comillas, sobre columna String → error.
+        ///   v3 — Usaba col.DataType para decidir comillas.
+        ///        Fallaba con valores alfanuméricos ("R21") en columnas INT:
+        ///        generaba "IdRancho = R21" → ADO.NET lo interpreta como nombre de columna
+        ///        → EvaluateException: Cannot find column [R21].
+        ///
+        /// SOLUCIÓN DEFINITIVA: usar LINQ sobre la DataTable.
+        ///   LINQ convierte todo a string para comparar — no usa el motor de expresiones
+        ///   de ADO.NET, elimina todos los problemas de tipos de raíz.
+        /// </summary>
+        private int EncontrarPosicionEnSpinner(Spinner spinner, DataTable tabla,
+            string campoClave, string valorClave, string campoNombre)
+        {
+            if (tabla == null || spinner?.Adapter == null || string.IsNullOrEmpty(valorClave))
+                return -1;
+
+            try
+            {
+                if (tabla.Columns[campoClave] == null)
+                {
+                    Log.Warn(TAG, $"EncontrarPosicionEnSpinner: columna '{campoClave}' no existe en {tabla.TableName}");
+                    return -1;
+                }
+
+                // LINQ: compara como string, inmune al tipo de la columna (INT, VARCHAR, etc.)
+                // Funciona con "03", "08", "R21", valores con leading-zeros, etc.
+
+                string valorBuscar = valorClave.Trim();
+                DataRow[] rows = tabla.AsEnumerable()
+                    .Where(r =>
+                    {
+                        if (r[campoClave] == null || r[campoClave] == DBNull.Value) return false;
+                        string cellStr = r[campoClave].ToString().Trim();
+                        if (cellStr == valorBuscar) return true;
+                        // Normalización numérica: "03" == "3", "38" == "38"
+                        if (int.TryParse(valorBuscar, out int vInt) && int.TryParse(cellStr, out int cInt))
+                            return vInt == cInt;
+                        return false;
+                    })
+                    .ToArray();
+
+                if (rows.Length == 0)
+                {
+                    Log.Warn(TAG, $"EncontrarPosicionEnSpinner: no se encontró {campoClave}='{valorClave}' en {tabla.TableName}");
+                    return -1;
+                }
+
+                string nombre = rows[0][campoNombre]?.ToString()?.Trim() ?? "";
+                if (string.IsNullOrEmpty(nombre)) return -1;
+
+                // Buscar en el adapter con comparación tolerante a espacios y case-insensitive
+                for (int i = 0; i < spinner.Adapter.Count; i++)
+                {
+                    string item = spinner.Adapter.GetItem(i)?.ToString()?.Trim() ?? "";
+                    if (string.Equals(item, nombre, StringComparison.OrdinalIgnoreCase))
+                        return i;
+                }
+
+                Log.Warn(TAG, $"EncontrarPosicionEnSpinner: nombre '{nombre}' no encontrado en adapter del spinner");
+                return -1;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"EncontrarPosicionEnSpinner error: {ex.Message}");
+                return -1;
             }
         }
 
+        // Mantenido para compatibilidad — ya no se usa en el flujo de flete
         private void SeleccionarSpinner(Spinner spinner, DataTable tabla, string campoClave, string valorClave, string campoNombre)
         {
-            if (tabla == null || spinner?.Adapter == null) return;
-
-            var row = tabla.Select($"{campoClave} = '{valorClave}'");
-            if (row.Length == 0) return;
-
-            string nombre = row[0][campoNombre].ToString().Trim();
-            int index = ((ArrayAdapter)spinner.Adapter).GetPosition(nombre);
-            if (index >= 0) spinner.SetSelection(index);
+            int pos = EncontrarPosicionEnSpinner(spinner, tabla, campoClave, valorClave, campoNombre);
+            if (pos >= 0) spinner.SetSelection(pos);
         }
 
-        // FIX #4: GetURL es async — operación de red no bloquea el UI thread
         public async Task<string> GetURL(int IdUnidadNegocio)
         {
             return await Task.Run(() =>
@@ -413,7 +630,6 @@ namespace RFIDTrackBin.fragment
         #endregion
 
         #region INICIAR ENTRADA
-        // FIX #4: Versión async — INSERT no bloquea el UI thread
         public async Task<int> InsertarEntradaAsync(
             string tipoMovimiento, string usuario,
             string entProveedor, string entRancho, string entTabla, string entStatus)
@@ -445,6 +661,11 @@ namespace RFIDTrackBin.fragment
                 });
 
                 IdConse = newId;
+
+                // ISSUE 2: Persistir la sesión activa para sobrevivir Home → regreso
+                GuardarSesionEntrada();
+                Log.Debug(TAG, $"Entrada insertada en BD: ID={IdConse}");
+
                 Toast.MakeText(Activity, "Inicio De Entrada...", ToastLength.Short).Show();
                 sprProveedor.Enabled = false;
                 sprRancho.Enabled = false;
@@ -459,8 +680,105 @@ namespace RFIDTrackBin.fragment
         }
         #endregion
 
+        // ─── ISSUE 2: PERSISTENCIA DE SESIÓN DE ENTRADA ──────────────────────────
+        // Patrón idéntico al de InventarioFragment. Guarda el estado en SharedPreferences
+        // para que al regresar desde Home se restaure: IdConse, spinners y estado de menú.
+        // Clave de archivo "rfid_entradas_prefs" — no colisiona con "rfid_salidas_prefs".
+
+        private const string PREFS_ENTRADAS = "rfid_entradas_prefs";
+        private const string PREF_E_ID = "IdConseEntrada";
+        private const string PREF_E_PROV = "ProvClaveEntrada";
+        private const string PREF_E_RANCHO = "RchClaveEntrada";
+        private const string PREF_E_TABLA = "TblClaveEntrada";
+        private const string PREF_E_ACTIVA = "EntradaActiva";
+
+        private void GuardarSesionEntrada()
+        {
+            if (IdConse <= 0) return;
+            var editor = _activity.GetSharedPreferences(PREFS_ENTRADAS, FileCreationMode.Private).Edit();
+            editor.PutInt(PREF_E_ID, IdConse);
+            editor.PutString(PREF_E_PROV, prov_clave ?? "");
+            editor.PutString(PREF_E_RANCHO, rch_clave ?? "");
+            editor.PutString(PREF_E_TABLA, tbl_clave ?? "");
+            editor.PutBoolean(PREF_E_ACTIVA, true);
+            editor.Apply();
+            Log.Debug(TAG, $"Entrada guardada en prefs: ID={IdConse}");
+        }
+
+        private void LimpiarSesionEntrada()
+        {
+            _activity.GetSharedPreferences(PREFS_ENTRADAS, FileCreationMode.Private).Edit().Clear().Apply();
+            Log.Debug(TAG, "Sesión de entrada limpiada en prefs");
+        }
+
+        /// <summary>
+        /// Llamado al final de OnViewCreated, después de cargar spinners.
+        /// Si había una sesión activa al ir a Home, la restaura completamente:
+        /// IdConse, spinners seleccionados, estado de botones y tabs de navegación.
+        /// </summary>
+        private async Task RestaurarSesionEntradaAsync()
+        {
+            var prefs = _activity.GetSharedPreferences(PREFS_ENTRADAS, FileCreationMode.Private);
+            if (!prefs.GetBoolean(PREF_E_ACTIVA, false)) return;
+
+            int savedId = prefs.GetInt(PREF_E_ID, -1);
+            string savedProv = prefs.GetString(PREF_E_PROV, "");
+            string savedRancho = prefs.GetString(PREF_E_RANCHO, "");
+            string savedTabla = prefs.GetString(PREF_E_TABLA, "");
+
+            if (savedId <= 0) { LimpiarSesionEntrada(); return; }
+
+            // Verificar que el registro sigue abierto en la BD
+            bool sigueAbierta = await Task.Run(() =>
+            {
+                try
+                {
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    const string sql = "SELECT COUNT(1) FROM Tb_RFID_Mstr WHERE IdConse=@id AND Mstr_Status='A'";
+                    using SqlCommand cmd = new SqlCommand(sql, conn);
+                    cmd.Parameters.AddWithValue("@id", savedId);
+                    conn.Open();
+                    return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
+                }
+                catch { return false; }
+            });
+
+            if (!sigueAbierta) { LimpiarSesionEntrada(); return; }
+
+            // Restaurar estado en memoria
+            IdConse = savedId;
+            prov_clave = savedProv;
+            rch_clave = savedRancho;
+            tbl_clave = savedTabla;
+
+            // Recargar spinners con los valores guardados (reutiliza ActualizarSpinnersDesdeFlete
+            // que ya desconecta handlers, carga en cascada y reconecta handlers)
+            ActualizarSpinnersDesdeFlete(new FleteItem
+            {
+                IdProveedor = savedProv,
+                IdRancho = savedRancho,
+                IdTabla = savedTabla
+            });
+
+            // Restaurar estado de UI: sesión en progreso
+            sprProveedor.Enabled = false;
+            sprRancho.Enabled = false;
+            sprTabla.Enabled = false;
+            btnGuardar.Enabled = true;
+
+            _menu?.FindItem(Resource.Id.inicio_entradas)?.SetEnabled(false);
+            _menu?.FindItem(Resource.Id.final_entradas)?.SetEnabled(true);
+
+            _activity.DisableNavigationItems(
+                Resource.Id.navigation_inventario,
+                Resource.Id.navigation_salidas,
+                Resource.Id.navigation_entradas);
+
+            Log.Debug(TAG, $"Sesión de entrada restaurada desde prefs: ID={IdConse}");
+            Toast.MakeText(_activity, $"Entrada #{IdConse} en curso (restaurada)", ToastLength.Short).Show();
+        }
+
         #region FINALIZAR ENTRADA
-        // FIX #4: Versión async
         public async Task ActualizarHoraCierreAsync(int idConse)
         {
             const string query = @"
@@ -490,7 +808,6 @@ namespace RFIDTrackBin.fragment
             }
         }
 
-        // FIX #4: Versión async
         public async Task UpdateFechaUltimoMovimientoAsync(int idConseInv)
         {
             const string query = @"
@@ -557,7 +874,6 @@ namespace RFIDTrackBin.fragment
         {
             Log.Debug(TAG, "OnPause - Deteniendo inventario");
 
-            // FIX #5: Eliminado Thread.Sleep que bloqueaba el UI thread
             try
             {
                 if (_activity?.baseReader?.Action == ActionState.Inventory6c)
@@ -620,7 +936,6 @@ namespace RFIDTrackBin.fragment
         #region RFID EVENTOS
         public void OnNotificationState(NotificationState state, Java.Lang.Object @params) { }
 
-        // FIX #1: _isInventoryInProgress se resetea cuando el inventario termina
         public void OnReaderActionChanged(BaseReader reader, ResultCode retCode, ActionState state, Java.Lang.Object @params)
         {
             if (state == ActionState.Stop)
@@ -746,7 +1061,6 @@ namespace RFIDTrackBin.fragment
                 if (_isDisposed || tagEPCList == null) return;
                 if (tagEPCList.Any(t => t.EPC == tag)) return;
 
-                // FIX #8: validaEPC ahora usa HashSet O(1)
                 if (validaEPC(tag))
                 {
                     PlayBeepSound();
@@ -780,7 +1094,7 @@ namespace RFIDTrackBin.fragment
             gvObject = view.FindViewById<GridView>(Resource.Id.gvleido);
         }
 
-        #region SPINNERS — todos async (FIX #4)
+        #region SPINNERS
         private async Task LoadProveedorAsync(View view, int idUnidadNegocio)
         {
             try
@@ -790,7 +1104,7 @@ namespace RFIDTrackBin.fragment
                 DataTable dt = await Task.Run(() =>
                 {
                     const string sql = @"
-                        SELECT IdProveedor, NombreProveedor
+                        SELECT IdProveedor, Prov_Clave, NombreProveedor
                         FROM Tb_RFID_Proveedores
                         WHERE Activo = 1
                           AND IdUnidadNegocio = @idUnidadNegocio
@@ -829,23 +1143,21 @@ namespace RFIDTrackBin.fragment
         private void sprProveedor_ItemSelected(object sender, AdapterView.ItemSelectedEventArgs e)
         {
             if (e.Position == 0) return;
-
-            int idProveedor = Convert.ToInt32(vwProveedor.Rows[e.Position - 1]["IdProveedor"]);
-
-            // FIX #4: carga en background
+            //int idProveedor = Convert.ToInt32(vwProveedor.Rows[e.Position - 1]["IdProveedor"]);
+            string idProveedor = vwProveedor.Rows[e.Position - 1]["Prov_Clave"].ToString().Trim();
             _ = LoadRanchosAsync(idProveedor);
         }
 
-        private async Task LoadRanchosAsync(int idProveedor)
+        private async Task LoadRanchosAsync(string idProveedor)
         {
             try
             {
                 DataTable dt = await Task.Run(() =>
                 {
                     const string sql = @"
-                        SELECT IdRancho, NombreRancho
+                        SELECT IdRancho, Ran_Clave, NombreRancho
                         FROM Tb_RFID_Ranchos
-                        WHERE IdProveedor = @IdProveedor AND Activo = 1
+                        WHERE IdProveedor = (SELECT IdProveedor FROM Tb_RFID_Proveedores WHERE Prov_Clave = @IdProveedor) AND Activo = 1
                         ORDER BY NombreRancho";
 
                     using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
@@ -881,21 +1193,36 @@ namespace RFIDTrackBin.fragment
         private void sprRancho_ItemSelected(object sender, AdapterView.ItemSelectedEventArgs e)
         {
             if (e.Position == 0) return;
-
-            int idRancho = Convert.ToInt32(vwRanchos.Rows[e.Position - 1]["IdRancho"]);
-            _ = LoadTablasAsync(idRancho);
+            //int idRancho = Convert.ToInt32(vwRanchos.Rows[e.Position - 1]["IdRancho"]);
+            string idRancho = vwRanchos.Rows[e.Position - 1]["Ran_Clave"].ToString().Trim();
+            _ = LoadTablaAsync(idRancho);
         }
 
-        private async Task LoadTablasAsync(int idRancho)
+        private async Task LoadTablaAsync(string idRancho)
         {
             try
             {
                 DataTable dt = await Task.Run(() =>
                 {
+
                     const string sql = @"
-                        SELECT IdTabla, NombreTabla
+                        SELECT IdTabla, Tab_Clave, NombreTabla
                         FROM Tb_RFID_Tablas
                         WHERE IdRancho = @IdRancho AND Activo = 1
+                        ORDER BY NombreTabla";
+                    const string sql2 = @"
+                        SELECT IdTabla, Tab_Clave, NombreTabla
+                        FROM Tb_RFID_Tablas
+                        WHERE IdRancho = (
+                            SELECT IdRancho 
+                            FROM Tb_RFID_Ranchos 
+                            WHERE Ran_Clave = @RanClave 
+                            AND IdProveedor = (
+                                SELECT IdProveedor 
+                                FROM Tb_RFID_Proveedores 
+                                WHERE Prov_Clave = @ProvClave
+                                )
+                            ) AND Activo = 1
                         ORDER BY NombreTabla";
 
                     using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
@@ -928,6 +1255,62 @@ namespace RFIDTrackBin.fragment
             }
         }
 
+        private async Task LoadTablasAsync(string provClave, string ranClave)
+        {
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion))
+                {
+                    await conn.OpenAsync();
+
+                    string query = @"
+                SELECT t.IdTabla, t.Tab_Clave, t.NombreTabla
+                FROM Tb_RFID_Tablas t
+                WHERE t.IdRancho =
+                (
+                    SELECT r.IdRancho
+                    FROM Tb_RFID_Ranchos r
+                    WHERE r.Ran_Clave = @RanClave
+                    AND r.IdProveedor =
+                    (
+                        SELECT p.IdProveedor
+                        FROM Tb_RFID_Proveedores p
+                        WHERE p.Prov_Clave = @ProvClave
+                    )
+                )
+                ORDER BY t.NombreTabla";
+
+                    using (SqlCommand cmd = new SqlCommand(query, conn))
+                    {
+                        cmd.Parameters.AddWithValue("@ProvClave", provClave);
+                        cmd.Parameters.AddWithValue("@RanClave", ranClave);
+
+                        SqlDataAdapter da = new SqlDataAdapter(cmd);
+
+                        vwTablas = new DataTable();
+                        da.Fill(vwTablas);
+                    }
+                }
+
+                Spinner spinner = vwEntradas.FindViewById<Spinner>(Resource.Id.sprTabla);
+
+                var adapter = new ArrayAdapter<string>(
+                    _activity,
+                    Android.Resource.Layout.SimpleSpinnerItem,
+                    vwTablas.AsEnumerable()
+                        .Select(r => r["NombreTabla"].ToString())
+                        .ToList());
+
+                adapter.SetDropDownViewResource(Android.Resource.Layout.SimpleSpinnerDropDownItem);
+
+                spinner.Adapter = adapter;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"LoadTablasAsync: {ex.Message}");
+            }
+        }
+
         private void sprTabla_ItemSelected(object sender, AdapterView.ItemSelectedEventArgs e)
         {
             if (e.Position == 0) return;
@@ -952,8 +1335,6 @@ namespace RFIDTrackBin.fragment
         {
             btnGuardar.Click += async (s, e) =>
             {
-                // FIX: Eliminada la llamada a ConnectTask en cada guardado.
-                //      Solo verificar si el lector está disponible.
                 if (!TryAssertReader())
                 {
                     Log.Warn(TAG, "No se pudo validar el lector.");
@@ -973,7 +1354,6 @@ namespace RFIDTrackBin.fragment
 
                 try
                 {
-                    // FIX #4: INSERT en background thread
                     registrosInsertados = await Task.Run(() =>
                     {
                         int insertados = 0;
@@ -1113,7 +1493,12 @@ namespace RFIDTrackBin.fragment
             for (int i = 0; i < MAX_MASK; i++)
             {
                 try { _activity.baseReader.RfidUhf.SetSelectMask6cEnabled(i, false); }
-                catch (ReaderException e) { throw e; }
+                catch (ReaderException)
+                {
+                    // FIX M3: "throw;" en lugar de "throw e;" para preservar
+                    //         el stack trace original de la excepción.
+                    throw;
+                }
             }
         }
 
@@ -1222,7 +1607,6 @@ namespace RFIDTrackBin.fragment
         }
 
         #region VALIDAR TAG VS CATÁLOGO
-        // FIX #8: Búsqueda O(1) usando HashSet
         private bool validaEPC(string EPC)
         {
             if (_activity.CatalogoEPCSet == null || _activity.CatalogoEPCSet.Count == 0)

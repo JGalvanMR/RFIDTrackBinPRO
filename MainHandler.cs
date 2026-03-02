@@ -62,25 +62,9 @@ namespace RFIDTrackBin
             Toast.MakeText(_activity.ApplicationContext, message, isLongDuration ? ToastLength.Long : ToastLength.Short).Show();
         }
 
-        private void HandlerProcess(Bundle bundle)
-        {
-            HandlerMsg msgType = (HandlerMsg)bundle.GetInt(ExtraName.HandleMsg);
-
-            switch (msgType)
-            {
-                case HandlerMsg.Toast:
-                    string data = bundle.GetString(ExtraName.Text);
-                    bool length = (bundle.GetInt(ExtraName.Number, 1) == 1);
-                    Toast.MakeText(_activity.ApplicationContext, data, length ? ToastLength.Long : ToastLength.Short).Show();
-                    break;
-                case HandlerMsg.Dialog:
-                    ShowDialog(bundle);
-                    break;
-                    //            case HideDialog:
-                    //                hideDialog(bundle);
-                    //                break;
-            }
-        }
+        // FIX M1: Eliminado HandlerProcess — era código muerto (nunca se llamaba)
+        //         que duplicaba exactamente la lógica de ProcessHandlerMessage + ShowToast.
+        //         Mantener código duplicado genera riesgo de divergencia en el futuro.
 
         void ShowDialog(Bundle dlgData)
         {

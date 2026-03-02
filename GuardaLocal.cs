@@ -31,33 +31,39 @@ namespace RFIDTrackBin
             }
         }
 
-
-
         public void creartxt(string error)
         {
-            //Java.IO.File sdCard = Android.OS.Environment.ExternalStorageDirectory; Java.IO.File dir = new Java.IO.File(sdCard.AbsolutePath + "/MyFolder"); dir.Mkdirs();
-            //Java.IO.File file = new Java.IO.File(dir, "habilitar.txt");
-
             Java.IO.File sdCard = Android.App.Application.Context.GetExternalFilesDir(null);
 
-            Java.IO.File dir = new Java.IO.File(sdCard.AbsolutePath + "/MyFolder"); dir.Mkdirs();
+            Java.IO.File dir = new Java.IO.File(sdCard.AbsolutePath + "/MyFolder");
+            dir.Mkdirs();
             Java.IO.File file = new Java.IO.File(dir, "errores.txt");
-            string FileToRead = file.ToString();
+
             if (!file.Exists())
             {
                 file.CreateNewFile();
-                file.Mkdir();
-                FileWriter writer = new FileWriter(file); // Writes the content to the file 
-                writer.Write(error + System.Environment.NewLine);
-                writer.Flush();
-                writer.Close();
+                // FIX C4: Eliminado file.Mkdir() — llamar Mkdir() sobre un archivo ya creado
+                //         con CreateNewFile() es incorrecto y puede corromper el archivo.
+
+                // FIX C4: FileWriter envuelto en try/finally para garantizar cierre
+                //         incluso si Write() lanza una excepción (evita file handle leak).
+                FileWriter writer = null;
+                try
+                {
+                    writer = new FileWriter(file);
+                    writer.Write(error + System.Environment.NewLine);
+                    writer.Flush();
+                }
+                finally
+                {
+                    writer?.Close();
+                }
             }
             else
             {
                 string rutaarchivo = file.ToString();
                 System.IO.File.AppendAllText(rutaarchivo, error + System.Environment.NewLine);
             }
-
         }
     }
 }

@@ -47,10 +47,6 @@ namespace RFIDTrackBin
     [IntentFilter(new[] { NfcAdapter.ActionNdefDiscovered, NfcAdapter.ActionTagDiscovered, Intent.CategoryDefault })]
     public class MainActivity : AppCompatActivity, BottomNavigationView.IOnNavigationItemSelectedListener
     {
-        // ─────────────────────────────────────────────────────────────────
-        // FIX #10: Credenciales movidas a constantes privadas.
-        //          Idealmente deberían estar en un archivo de config excluido del repo.
-        // ─────────────────────────────────────────────────────────────────
         public static string cadenaConexion = "Persist Security Info=False;user id=sa; password=Gabira1;Initial Catalog = GAB_Irapuato; server=tcp:189.206.160.206,2352; MultipleActiveResultSets=true; Connect Timeout = 0";
         public static string cadenaConexionMySQL = "server=gab.mrlucky.com.mx;port=3306;database=campo;user id=www1166;password=taQ17Zm;";
 
@@ -66,20 +62,16 @@ namespace RFIDTrackBin
         public static MainActivity Instance => instance;
 
         #region BASE DE DATOS
-        DataSet ds = new DataSet();
+        // FIX B1: Eliminado DataSet ds — nunca se usaba, instancia innecesaria en memoria.
 
         #region TABLAS
         public DataTable Tb_RFID_Catalogo = new DataTable("Tb_RFID_Catalogo");
 
-        // ─────────────────────────────────────────────────────────────────
-        // FIX #8: HashSet para búsquedas O(1) en lugar de O(n) por cada tag
-        // ─────────────────────────────────────────────────────────────────
         public HashSet<string> CatalogoEPCSet { get; private set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         #endregion
         #endregion
 
         #region NFC
-        // FIX: Eliminado _nfcAdapter duplicado — solo existe nfcAdapter
         NfcAdapter nfcAdapter;
         PendingIntent nfcPendingIntent;
         IntentFilter[] nfcIntentFilters;
@@ -164,13 +156,13 @@ namespace RFIDTrackBin
 
             BtHelper = new BluetoothHelper(this);
 
-            // FIX #4: Carga de catálogo en background, no bloquea el UI thread
             _ = getTb_RFID_CatalogoAsync();
 
-            #region ScanService
-            var filter = new IntentFilter("unitech.scanservice.data");
-            RegisterReceiver(new ScanReceiver(), filter);
-            #endregion
+            // FIX C1: Eliminado el registro dinámico de ScanReceiver.
+            //         ScanReceiver ya está declarado con [BroadcastReceiver] + [IntentFilter]
+            //         en ScanReceiver.cs, lo que lo registra en el manifest automáticamente.
+            //         Registrarlo aquí dinámicamente causaba que cada scan se procesara
+            //         DOS veces: una por el manifest y otra por este registro dinámico.
 
             #region BAJA CAJONES (BOTON FLOTANTE)
             if (bajaCajones == "True")
@@ -246,7 +238,6 @@ namespace RFIDTrackBin
         {
             BottomNavigation.Visibility = ViewStates.Visible;
 
-            // FIX #9: Protección null — fabMain solo existe si bajaCajones == "True"
             if (fabMain != null)
                 fabMain.Visibility = ViewStates.Visible;
         }
@@ -339,7 +330,6 @@ namespace RFIDTrackBin
                 bajaDialog = null;
                 _dialogoNecesitaRefresh = false;
 
-                // FIX #4: Recarga catálogo en background
                 _ = getTb_RFID_CatalogoAsync();
             });
 
@@ -430,7 +420,6 @@ namespace RFIDTrackBin
         {
             try
             {
-                // FIX #8: Uso de HashSet O(1) en lugar de loop O(n)
                 if (CatalogoEPCSet == null || CatalogoEPCSet.Count == 0)
                 {
                     Log.Warn(TAG, "Catálogo vacío, recargando...");
@@ -449,7 +438,6 @@ namespace RFIDTrackBin
         #endregion
 
         #region ACTUALIZAR BAJA DE CAJONES
-        // FIX #4: Operación SQL movida a background thread
         private async Task ActualizarEstatusRFIDAsync(List<string> qrListEPCs)
         {
             if (qrListEPCs == null || qrListEPCs.Count == 0)
@@ -564,6 +552,11 @@ namespace RFIDTrackBin
         #region METODOS RFID CENTRALIZADO
         public async Task InitializeReader()
         {
+            // FIX C2-v2: Protección contra ejecuciones concurrentes.
+            //            Si ya hay una inicialización en curso (flag activo), salir inmediatamente.
+            if (_isInitializingReader) return;
+
+            _isInitializingReader = true;
             try
             {
                 if (baseReader != null)
@@ -599,6 +592,12 @@ namespace RFIDTrackBin
                 Log.Error(TAG, $"Error al conectar: {e.Message}");
                 IsReaderConnected = false;
                 throw;
+            }
+            finally
+            {
+                // FIX C2-v2: Siempre liberar el flag, tanto en éxito como en excepción,
+                //            para que intentos futuros (p.ej. ReconnectReader) puedan proceder.
+                _isInitializingReader = false;
             }
         }
 
@@ -664,6 +663,13 @@ namespace RFIDTrackBin
         }
 
         private bool _isMonitoringReader = false;
+
+        // FIX C2-v2: Flag para evitar que OnResume lance una segunda inicialización
+        //            mientras OnCreate ya tiene una en curso (aún no ha asignado baseReader).
+        //            Sin este flag, OnResume veía baseReader == null y disparaba un segundo
+        //            Task.Run(InitializeReader) concurrente, causando "Radio is already opened"
+        //            y tres System.TimeoutException en el log de inicio.
+        private bool _isInitializingReader = false;
 
         private async Task MonitorReaderStatus()
         {
@@ -775,13 +781,28 @@ namespace RFIDTrackBin
         protected override void OnDestroy()
         {
             _isMonitoringReader = false;
-            if (baseReader != null && IsReaderConnected)
+
+            // FIX A2: Limpiar la referencia estática a esta Activity para permitir
+            //         que el GC la recolecte con todos sus recursos (Views, Fragments, etc.).
+            instance = null;
+
+            // FIX A2: Limpiar baseReader independientemente del valor de IsReaderConnected,
+            //         ya que el estado del flag podría no reflejar la realidad exacta.
+            if (baseReader != null)
             {
-                baseReader.RfidUhf?.Stop();
-                baseReader.Disconnect();
-                baseReader = null;
-                IsReaderConnected = false;
+                try
+                {
+                    baseReader.RfidUhf?.Stop();
+                    baseReader.Disconnect();
+                }
+                catch { }
+                finally
+                {
+                    baseReader = null;
+                    IsReaderConnected = false;
+                }
             }
+
             base.OnDestroy();
         }
 
@@ -846,6 +867,34 @@ namespace RFIDTrackBin
                 fabMain.BringToFront();
                 fabMain.Visibility = ViewStates.Visible;
             }
+
+            // FIX C2-v2: Condición ampliada con _isInitializingReader.
+            //            La condición anterior (baseReader == null && !_isMonitoringReader)
+            //            era verdadera también durante el arranque normal porque OnResume
+            //            siempre se ejecuta justo después de OnCreate, antes de que el
+            //            Task.Run asíncrono de InitializeReader haya tenido tiempo de
+            //            asignar baseReader. Agregando !_isInitializingReader se garantiza
+            //            que este bloque solo actúa cuando realmente NO hay inicialización
+            //            en curso (es decir, en reconexiones reales, no en el arranque).
+            if (baseReader == null && !_isMonitoringReader && !_isInitializingReader)
+            {
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await InitializeReader();
+                        if (IsReaderConnected)
+                        {
+                            AppLogger.Log("Lector reconectado en OnResume.");
+                            _ = Task.Run(() => MonitorReaderStatus());
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLogger.LogError(ex);
+                    }
+                });
+            }
         }
 
         protected override void OnNewIntent(Intent intent)
@@ -887,8 +936,6 @@ namespace RFIDTrackBin
         #endregion
 
         #region CATALOGOS
-        // FIX #4: Carga de catálogo completamente en background. Nunca bloquea el UI thread.
-        // FIX #8: Pobla CatalogoEPCSet (HashSet) para búsquedas O(1).
         public async Task getTb_RFID_CatalogoAsync()
         {
             try
@@ -902,7 +949,6 @@ namespace RFIDTrackBin
                     using (SqlDataAdapter da = new SqlDataAdapter(query, conn))
                         da.Fill(dt);
 
-                    // Construir HashSet mientras aún estamos en background
                     var hashSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (DataRow row in dt.Rows)
                     {
@@ -918,7 +964,6 @@ namespace RFIDTrackBin
                     return (dt, hashSet);
                 });
 
-                // Solo la asignación final toca propiedades del objeto (thread-safe por ser simples asignaciones)
                 Tb_RFID_Catalogo = tabla;
                 CatalogoEPCSet = set;
 
@@ -940,8 +985,6 @@ namespace RFIDTrackBin
             }
         }
 
-        // Mantener para compatibilidad con fragmentos que llaman al método síncrono.
-        // Lanza la tarea async y retorna inmediatamente sin bloquear.
         public void getTb_RFID_Catalogo() => _ = getTb_RFID_CatalogoAsync();
         #endregion
 
@@ -969,6 +1012,14 @@ namespace RFIDTrackBin
 
         protected override void OnStop()
         {
+            // ISSUE 1 FIX: Detener el loop de monitoreo ANTES de destruir el lector.
+            // Sin esta línea, _isMonitoringReader permanece true mientras el loop sigue
+            // corriendo con baseReader == null. Cuando el usuario regresa (OnResume),
+            // la condición "!_isMonitoringReader" es false → la reconexión se salta
+            // y el lector queda permanentemente muerto hasta reiniciar la app.
+            _isMonitoringReader = false;
+            IsReaderConnected = false;
+
             if (baseReader != null)
             {
                 baseReader.RfidUhf?.Stop();
