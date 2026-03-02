@@ -62,12 +62,13 @@ namespace RFIDTrackBin
         public static MainActivity Instance => instance;
 
         #region BASE DE DATOS
-        // FIX B1: Eliminado DataSet ds — nunca se usaba, instancia innecesaria en memoria.
-
         #region TABLAS
         public DataTable Tb_RFID_Catalogo = new DataTable("Tb_RFID_Catalogo");
 
-        public HashSet<string> CatalogoEPCSet { get; private set; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // FIX M-3: volatile garantiza visibilidad entre hilos sin necesidad de lock
+        // para la asignación de referencia (Task.Run escribe, UI thread lee).
+        private volatile HashSet<string> _catalogoEPCSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> CatalogoEPCSet => _catalogoEPCSet;
         #endregion
         #endregion
 
@@ -115,7 +116,6 @@ namespace RFIDTrackBin
         public static BluetoothHelper BtHelper { get; private set; }
         public HoraServidorService.ResultadoHora Privilegios { get; set; }
 
-
         protected override void OnCreate(Bundle savedInstanceState)
         {
             base.OnCreate(savedInstanceState);
@@ -158,12 +158,6 @@ namespace RFIDTrackBin
 
             _ = getTb_RFID_CatalogoAsync();
 
-            // FIX C1: Eliminado el registro dinámico de ScanReceiver.
-            //         ScanReceiver ya está declarado con [BroadcastReceiver] + [IntentFilter]
-            //         en ScanReceiver.cs, lo que lo registra en el manifest automáticamente.
-            //         Registrarlo aquí dinámicamente causaba que cada scan se procesara
-            //         DOS veces: una por el manifest y otra por este registro dinámico.
-
             #region BAJA CAJONES (BOTON FLOTANTE)
             if (bajaCajones == "True")
             {
@@ -190,12 +184,13 @@ namespace RFIDTrackBin
                 new Intent(this, typeof(MainActivity)).AddFlags(ActivityFlags.SingleTop),
                 PendingIntentFlags.Mutable);
 
+            // FIX M-4: Eliminado new IntentFilter(Intent.CategoryDefault) — es una categoría,
+            // no una acción; usarlo como argumento de IntentFilter(string) no tiene efecto útil.
             nfcIntentFilters = new IntentFilter[]
             {
                 new IntentFilter(NfcAdapter.ActionTagDiscovered),
                 new IntentFilter(NfcAdapter.ActionNdefDiscovered),
                 new IntentFilter(NfcAdapter.ActionTechDiscovered),
-                new IntentFilter(Intent.CategoryDefault),
             };
 
             techLists = new string[][]
@@ -237,7 +232,6 @@ namespace RFIDTrackBin
         public void MostrarElementosNavegacion()
         {
             BottomNavigation.Visibility = ViewStates.Visible;
-
             if (fabMain != null)
                 fabMain.Visibility = ViewStates.Visible;
         }
@@ -257,13 +251,11 @@ namespace RFIDTrackBin
                 case MotionEventActions.Move:
                     float newX = e.Event.RawX + dX;
                     float newY = e.Event.RawY + dY;
-
                     if (newX < 0) newX = 0;
                     if (newX > screenWidth - fabMain.Width) newX = screenWidth - fabMain.Width;
                     if (newY < 0) newY = 0;
                     if (newY > screenHeight - fabMain.Height - GetNavigationBarHeight())
                         newY = screenHeight - fabMain.Height - GetNavigationBarHeight();
-
                     fabMain.Animate().X(newX).Y(newY).SetDuration(0).Start();
                     lastAction = (int)e.Event.Action;
                     break;
@@ -335,6 +327,10 @@ namespace RFIDTrackBin
 
             builder.SetNegativeButton("CANCELAR", (sender, args) =>
             {
+                // FIX M-5: Limpiar qrList al cancelar para evitar que tags de esta sesión
+                // aparezcan en la siguiente apertura del diálogo.
+                qrList.Clear();
+                qrAdapter?.NotifyDataSetChanged();
                 bajaDialog?.Dismiss();
                 bajaDialog = null;
                 _dialogoNecesitaRefresh = false;
@@ -420,14 +416,14 @@ namespace RFIDTrackBin
         {
             try
             {
-                if (CatalogoEPCSet == null || CatalogoEPCSet.Count == 0)
+                if (_catalogoEPCSet == null || _catalogoEPCSet.Count == 0)
                 {
                     Log.Warn(TAG, "Catálogo vacío, recargando...");
                     _ = getTb_RFID_CatalogoAsync();
                     return false;
                 }
 
-                return CatalogoEPCSet.Contains(EPC.Trim());
+                return _catalogoEPCSet.Contains(EPC.Trim());
             }
             catch (Exception ex)
             {
@@ -506,7 +502,6 @@ namespace RFIDTrackBin
         public void DisableNavigationItems(params int[] itemIds)
         {
             if (BottomNavigation == null) return;
-
             if (itemIds.Length == 0)
             {
                 for (int i = 0; i < BottomNavigation.Menu.Size(); i++)
@@ -522,7 +517,6 @@ namespace RFIDTrackBin
         public void EnableNavigationItems(params int[] itemIds)
         {
             if (BottomNavigation == null) return;
-
             if (itemIds.Length == 0)
             {
                 for (int i = 0; i < BottomNavigation.Menu.Size(); i++)
@@ -552,8 +546,6 @@ namespace RFIDTrackBin
         #region METODOS RFID CENTRALIZADO
         public async Task InitializeReader()
         {
-            // FIX C2-v2: Protección contra ejecuciones concurrentes.
-            //            Si ya hay una inicialización en curso (flag activo), salir inmediatamente.
             if (_isInitializingReader) return;
 
             _isInitializingReader = true;
@@ -595,8 +587,6 @@ namespace RFIDTrackBin
             }
             finally
             {
-                // FIX C2-v2: Siempre liberar el flag, tanto en éxito como en excepción,
-                //            para que intentos futuros (p.ej. ReconnectReader) puedan proceder.
                 _isInitializingReader = false;
             }
         }
@@ -663,12 +653,6 @@ namespace RFIDTrackBin
         }
 
         private bool _isMonitoringReader = false;
-
-        // FIX C2-v2: Flag para evitar que OnResume lance una segunda inicialización
-        //            mientras OnCreate ya tiene una en curso (aún no ha asignado baseReader).
-        //            Sin este flag, OnResume veía baseReader == null y disparaba un segundo
-        //            Task.Run(InitializeReader) concurrente, causando "Radio is already opened"
-        //            y tres System.TimeoutException en el log de inicio.
         private bool _isInitializingReader = false;
 
         private async Task MonitorReaderStatus()
@@ -705,14 +689,8 @@ namespace RFIDTrackBin
 
             switch (Build.Device)
             {
-                case "HT730":
-                    keyName = "TRIGGER_GUN";
-                    keyCode = "298";
-                    break;
-                case "PA768":
-                    keyName = "SCAN_GUN";
-                    keyCode = "294";
-                    break;
+                case "HT730": keyName = "TRIGGER_GUN"; keyCode = "298"; break;
+                case "PA768": keyName = "SCAN_GUN"; keyCode = "294"; break;
                 default:
                     Log.Debug("MainActivity", "Skip to set gun key code");
                     return;
@@ -782,12 +760,12 @@ namespace RFIDTrackBin
         {
             _isMonitoringReader = false;
 
-            // FIX A2: Limpiar la referencia estática a esta Activity para permitir
-            //         que el GC la recolecte con todos sus recursos (Views, Fragments, etc.).
             instance = null;
 
-            // FIX A2: Limpiar baseReader independientemente del valor de IsReaderConnected,
-            //         ya que el estado del flag podría no reflejar la realidad exacta.
+            // FIX M-1: Nular _handler para romper la referencia circular estática
+            // que impedía que el GC recolectara la activity con sus Views y Fragments.
+            _handler = null;
+
             if (baseReader != null)
             {
                 try
@@ -847,8 +825,7 @@ namespace RFIDTrackBin
                 await Task.Delay(2000);
                 await InitializeReader();
 
-                if (IsReaderConnected)
-                    ShowToast("Lector reconectado");
+                if (IsReaderConnected) ShowToast("Lector reconectado");
             }
             catch (Exception ex)
             {
@@ -858,7 +835,7 @@ namespace RFIDTrackBin
         }
         #endregion
 
-        #region NFC
+        #region NFC / OnResume / OnPause
         protected override void OnResume()
         {
             base.OnResume();
@@ -868,14 +845,6 @@ namespace RFIDTrackBin
                 fabMain.Visibility = ViewStates.Visible;
             }
 
-            // FIX C2-v2: Condición ampliada con _isInitializingReader.
-            //            La condición anterior (baseReader == null && !_isMonitoringReader)
-            //            era verdadera también durante el arranque normal porque OnResume
-            //            siempre se ejecuta justo después de OnCreate, antes de que el
-            //            Task.Run asíncrono de InitializeReader haya tenido tiempo de
-            //            asignar baseReader. Agregando !_isInitializingReader se garantiza
-            //            que este bloque solo actúa cuando realmente NO hay inicialización
-            //            en curso (es decir, en reconexiones reales, no en el arranque).
             if (baseReader == null && !_isMonitoringReader && !_isInitializingReader)
             {
                 Task.Run(async () =>
@@ -953,19 +922,20 @@ namespace RFIDTrackBin
                     foreach (DataRow row in dt.Rows)
                     {
                         string epc = row["IdClaveTag"]?.ToString()?.Trim();
-                        if (!string.IsNullOrEmpty(epc))
-                            hashSet.Add(epc);
+                        if (!string.IsNullOrEmpty(epc)) hashSet.Add(epc);
 
                         string claveInt = row["IdClaveInt"]?.ToString()?.Trim();
-                        if (!string.IsNullOrEmpty(claveInt))
-                            hashSet.Add(claveInt);
+                        if (!string.IsNullOrEmpty(claveInt)) hashSet.Add(claveInt);
                     }
 
                     return (dt, hashSet);
                 });
 
+                // FIX M-3: Asignación atómica de referencias volatile.
+                // El lector de UI thread siempre verá el objeto completo o el anterior,
+                // nunca un objeto a medio construir.
                 Tb_RFID_Catalogo = tabla;
-                CatalogoEPCSet = set;
+                _catalogoEPCSet = set;
 
                 if (tabla.Rows.Count == 0)
                 {
@@ -988,11 +958,13 @@ namespace RFIDTrackBin
         public void getTb_RFID_Catalogo() => _ = getTb_RFID_CatalogoAsync();
         #endregion
 
+        // FIX M-2: Eliminada la segunda llamada a SetOnNavigationItemSelectedListener.
+        // Solo se registra en OnCreate (donde BottomNavigation ya está asignado).
         private void InitializeUI()
         {
             textMessage = FindViewById<TextView>(Resource.Id.message);
-            var navigation = FindViewById<BottomNavigationView>(Resource.Id.navigation);
-            navigation.SetOnNavigationItemSelectedListener(this);
+            // FIX M-2: Eliminado navigation.SetOnNavigationItemSelectedListener(this)
+            // que duplicaba el registro hecho en OnCreate.
 
             if (SupportFragmentManager.Fragments.Count == 0 &&
                 (usuario == "DESCARGUE" || usuario == "SISTEMAS"))
@@ -1012,11 +984,6 @@ namespace RFIDTrackBin
 
         protected override void OnStop()
         {
-            // ISSUE 1 FIX: Detener el loop de monitoreo ANTES de destruir el lector.
-            // Sin esta línea, _isMonitoringReader permanece true mientras el loop sigue
-            // corriendo con baseReader == null. Cuando el usuario regresa (OnResume),
-            // la condición "!_isMonitoringReader" es false → la reconexión se salta
-            // y el lector queda permanentemente muerto hasta reiniciar la app.
             _isMonitoringReader = false;
             IsReaderConnected = false;
 

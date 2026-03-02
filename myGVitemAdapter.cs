@@ -24,11 +24,6 @@ namespace RFIDTrackBin
 
         public override View GetView(int position, View convertView, ViewGroup parent)
         {
-            // FIX A3: Implementado patrón ViewHolder idéntico al que ya existía en
-            //         myGVitemAdapterFP. Antes, FindViewById se ejecutaba en CADA bind
-            //         incluso cuando convertView era reutilizado, causando lag en scroll.
-            //         Con ViewHolder, FindViewById solo se llama una vez por celda (inflate),
-            //         y en rebinds se recupera el holder directamente desde convertView.Tag.
             ViewHolder holder;
 
             try
@@ -57,7 +52,16 @@ namespace RFIDTrackBin
             }
             catch (Exception e)
             {
-                System.Diagnostics.Debug.WriteLine($"Error en myGVitemAdapter: {e.Message}");
+                // FIX A-1: Loguear error en lugar de silenciarlo.
+                AppLogger.LogError(e);
+
+                // Garantizar que GetView nunca devuelva null — causa NullReferenceException
+                // en el sistema de GridView si convertView fue null antes del inflate.
+                if (convertView == null)
+                {
+                    convertView = _CurrentContext.LayoutInflater
+                        .Inflate(Android.Resource.Layout.SimpleListItem1, parent, false);
+                }
             }
 
             return convertView;

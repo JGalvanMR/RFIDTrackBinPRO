@@ -34,7 +34,6 @@ namespace RFIDTrackBin.fragment
 {
     public class VerificacionFragment : BaseFragment, IReaderEventListener, IRfidUhfEventListener, MainReceiver.IEventLitener, View.IOnTouchListener
     {
-        // FIX CRÍTICO #1: TAG usaba typeof(InventarioFragment) — todos los logs eran incorrectos
         static string TAG = typeof(VerificacionFragment).Name;
 
         static string keymappingPath = "/storage/emulated/0/Android/data/com.unitech.unitechrfidsample";
@@ -53,6 +52,9 @@ namespace RFIDTrackBin.fragment
         private DateTime _lastTriggerTime = DateTime.MinValue;
 
         #region Views
+        // FIX V-3: connectedState y areaLectura se dejan null intencionalmente.
+        // VerificacionFragment.xml no contiene txtConnectedStateInventario ni txtAreaLecturaInventario.
+        // ReceiveHandler ya tiene null-check para connectedState — no hay riesgo de crash.
         TextView connectedState;
         TextView areaLectura;
         TextView totalCajasLeidas;
@@ -72,8 +74,6 @@ namespace RFIDTrackBin.fragment
         private myGVitemAdapter adapter;
 
         int totalCajasLeidasINT = 0;
-
-        // FIX #7: Eliminado campo "SqlConnection thisConnection" que no se cerraba
 
         IMenu _menu;
         ProgressBar progressBar;
@@ -123,8 +123,11 @@ namespace RFIDTrackBin.fragment
 
         private void FindViews(View view)
         {
-            connectedState = view.FindViewById<TextView>(Resource.Id.txtConnectedStateInventario);
-            areaLectura = view.FindViewById<TextView>(Resource.Id.txtAreaLecturaInventario);
+            // FIX V-3: Estos IDs no existen en VerificacionFragment.xml.
+            // FindViewById devolverá null — ReceiveHandler y UpdateText lo manejan con null-checks.
+            connectedState = null; // view.FindViewById<TextView>(Resource.Id.txtConnectedStateInventario);
+            areaLectura = null; // view.FindViewById<TextView>(Resource.Id.txtAreaLecturaInventario);
+
             totalCajasLeidas = view.FindViewById<TextView>(Resource.Id.txtNumTotalCajas);
             txtTotalAcumulado = view.FindViewById<TextView>(Resource.Id.txtNumTotalAcumulado);
             gvObject = view.FindViewById<GridView>(Resource.Id.gvleidoVerificacion);
@@ -161,6 +164,22 @@ namespace RFIDTrackBin.fragment
             _activity?.OcultarElementosNavegacion();
             _activity.currentRfidFragment = this;
 
+            // FIX V-1: Re-registrar mReceiver en OnResume para que el gatillo funcione
+            // tras el primer ciclo background/foreground. Sin este bloque el receiver
+            // queda muerto permanentemente después de OnPause → OnResume.
+            if (mReceiver != null)
+            {
+                try
+                {
+                    IntentFilter filter = new IntentFilter();
+                    filter.AddAction(MainReceiver.rfidGunPressed);
+                    filter.AddAction(MainReceiver.rfidGunReleased);
+                    _activity.RegisterReceiver(mReceiver, filter);
+                }
+                catch (Java.Lang.IllegalArgumentException) { /* ya registrado */ }
+                catch (Exception ex) { Log.Warn(TAG, $"RegisterReceiver en OnResume: {ex.Message}"); }
+            }
+
             if (_activity?.baseReader != null &&
                 _activity.baseReader.State == ConnectState.Connected &&
                 _activity.baseReader.RfidUhf != null)
@@ -187,7 +206,6 @@ namespace RFIDTrackBin.fragment
         {
             Log.Debug(TAG, "OnPause - Deteniendo inventario");
 
-            // FIX #5: Eliminado Thread.Sleep que bloqueaba el UI thread
             try
             {
                 if (_activity?.baseReader?.Action == ActionState.Inventory6c)
@@ -205,7 +223,10 @@ namespace RFIDTrackBin.fragment
             }
             catch { }
 
-            try { _activity?.UnregisterReceiver(mReceiver); } catch { }
+            // Desregistrar receiver de forma robusta
+            try { _activity?.UnregisterReceiver(mReceiver); }
+            catch (Java.Lang.IllegalArgumentException) { /* no estaba registrado */ }
+            catch { }
 
             base.OnPause();
             Log.Debug(TAG, "OnPause completado");
@@ -260,7 +281,6 @@ namespace RFIDTrackBin.fragment
         #region RFID EVENTOS
         public void OnNotificationState(NotificationState state, Java.Lang.Object @params) { }
 
-        // FIX #1: _isInventoryInProgress se resetea al Stop
         public void OnReaderActionChanged(BaseReader reader, ResultCode retCode, ActionState state, Java.Lang.Object @params)
         {
             if (state == ActionState.Stop)
@@ -319,8 +339,15 @@ namespace RFIDTrackBin.fragment
         public void OnReaderStateChanged(BaseReader reader, ConnectState state, Java.Lang.Object @params)
         {
             UpdateText(IDType.ConnectState, state.ToString());
+
+            // FIX V-2: RemoveListener antes de AddListener para evitar acumulación
+            // de referencias que causaría que cada tag se procese N veces.
             if (_activity?.baseReader?.RfidUhf != null)
+            {
+                try { _activity.baseReader.RfidUhf.RemoveListener(this); } catch { }
                 _activity.baseReader.RfidUhf.AddListener(this);
+            }
+
             setUseGunKeyCode();
         }
 
@@ -363,7 +390,6 @@ namespace RFIDTrackBin.fragment
                 if (_isDisposed || tagEPCList == null) return;
                 if (tagEPCList.Any(t => t.EPC == tag)) return;
 
-                // FIX #8: validaEPC usa HashSet O(1)
                 if (validaEPC(tag))
                 {
                     PlayBeepSound();
@@ -386,7 +412,6 @@ namespace RFIDTrackBin.fragment
             {
                 string data = bundle.GetString(ExtraName.Text);
                 IDType idType = (IDType)bundle.GetInt(ExtraName.TargetID);
-                // Nota: txtConnectedStateInventario puede ser null si no existe en el layout actual
                 if (idType == IDType.ConnectState && connectedState != null)
                     connectedState.Text = data;
             }
@@ -493,11 +518,14 @@ namespace RFIDTrackBin.fragment
             for (int i = 0; i < MAX_MASK; i++)
             {
                 try { _activity.baseReader.RfidUhf.SetSelectMask6cEnabled(i, false); }
-                catch (ReaderException e) { throw e; }
+                catch (ReaderException)
+                {
+                    // FIX V-4: "throw" en lugar de "throw e" para preservar el stack trace original.
+                    throw;
+                }
             }
         }
 
-        // FIX CRÍTICO #2: UpdateText usaba FragmentType.Inventario — los mensajes iban al fragmento equivocado
         public void UpdateText(IDType id, string data)
             => Utilities.UpdateUIText(FragmentType.Verificacion, (int)id, data);
 
@@ -605,7 +633,6 @@ namespace RFIDTrackBin.fragment
         public bool OnTouch(View v, MotionEvent e) => false;
 
         #region VALIDAR TAG VS CATÁLOGO
-        // FIX #8: Búsqueda O(1) usando HashSet
         private bool validaEPC(string EPC)
         {
             if (_activity.CatalogoEPCSet == null || _activity.CatalogoEPCSet.Count == 0)

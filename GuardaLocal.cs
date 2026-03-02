@@ -9,12 +9,16 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Net;
+using System.Net.Http;
+using System.Threading.Tasks;
 using Java.IO;
 
 namespace RFIDTrackBin
 {
     public class GuardaLocal
     {
+        // Versión síncrona conservada para compatibilidad.
+        // ADVERTENCIA: bloquea el hilo llamante — no usar desde UI thread.
         public bool HayConexion(string direccionweb)
         {
             try
@@ -23,6 +27,28 @@ namespace RFIDTrackBin
                 using (client.OpenRead(direccionweb))
                 {
                     return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // FIX G-1: Versión async no bloqueante para usar desde UI thread.
+        public async Task<bool> HayConexionAsync(string direccionweb)
+        {
+            try
+            {
+                using (var client = new HttpClient())
+                {
+                    client.Timeout = TimeSpan.FromSeconds(5);
+                    using (var response = await client.GetAsync(
+                        direccionweb,
+                        HttpCompletionOption.ResponseHeadersRead))
+                    {
+                        return response.IsSuccessStatusCode;
+                    }
                 }
             }
             catch
@@ -42,11 +68,7 @@ namespace RFIDTrackBin
             if (!file.Exists())
             {
                 file.CreateNewFile();
-                // FIX C4: Eliminado file.Mkdir() — llamar Mkdir() sobre un archivo ya creado
-                //         con CreateNewFile() es incorrecto y puede corromper el archivo.
 
-                // FIX C4: FileWriter envuelto en try/finally para garantizar cierre
-                //         incluso si Write() lanza una excepción (evita file handle leak).
                 FileWriter writer = null;
                 try
                 {

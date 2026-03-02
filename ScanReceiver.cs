@@ -23,16 +23,21 @@ namespace RFIDTrackBin
                 if (bundle != null)
                 {
                     string qrText = bundle.GetString("text");
-                    
 
                     if (!string.IsNullOrEmpty(qrText))
                     {
-                        // Llamamos al MainActivity para procesar el QR
-                        MainActivity.Instance?.ProcessQR(qrText);
+                        // FIX SR-1: Loguear cuando Instance es null para no perder scans silenciosamente
+                        if (MainActivity.Instance != null)
+                        {
+                            MainActivity.Instance.ProcessQR(qrText);
+                        }
+                        else
+                        {
+                            AppLogger.Log($"[ScanReceiver] Scan ignorado — MainActivity no disponible. Texto: {qrText}");
+                        }
                     }
                 }
             }
         }
     }
-
 }

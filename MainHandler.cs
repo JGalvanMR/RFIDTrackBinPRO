@@ -27,6 +27,10 @@ namespace RFIDTrackBin
         {
             base.HandleMessage(msg);
 
+            // FIX MH-2: Guardia contra mensajes que llegan tras OnDestroy
+            if (_activity == null || _activity.IsDestroyed || _activity.IsFinishing)
+                return;
+
             var fragmentType = (FragmentType)msg.What;
             var baseFragment = _activity.GetFragment(fragmentType);
 
@@ -62,12 +66,14 @@ namespace RFIDTrackBin
             Toast.MakeText(_activity.ApplicationContext, message, isLongDuration ? ToastLength.Long : ToastLength.Short).Show();
         }
 
-        // FIX M1: Eliminado HandlerProcess — era código muerto (nunca se llamaba)
-        //         que duplicaba exactamente la lógica de ProcessHandlerMessage + ShowToast.
-        //         Mantener código duplicado genera riesgo de divergencia en el futuro.
-
         void ShowDialog(Bundle dlgData)
         {
+            // FIX MH-1: Cerrar diálogo anterior antes de crear uno nuevo para evitar acumulación
+            if (alertDialog != null && alertDialog.IsShowing)
+            {
+                try { alertDialog.Dismiss(); } catch { }
+            }
+
             InitAlertDlg();
             alertDialog.SetTitle(dlgData.GetString(ExtraName.Title));
             alertDialog.SetMessage(dlgData.GetString(ExtraName.Text));
