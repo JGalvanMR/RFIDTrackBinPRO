@@ -7,9 +7,9 @@ using Android.Widget;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Net;
 using System.Net.Http;
+using System.Text;
 using System.Threading.Tasks;
 using Java.IO;
 
@@ -17,8 +17,9 @@ namespace RFIDTrackBin
 {
     public class GuardaLocal
     {
-        // Versión síncrona conservada para compatibilidad.
-        // ADVERTENCIA: bloquea el hilo llamante — no usar desde UI thread.
+        // Versión síncrona conservada para compatibilidad con código existente.
+        // ADVERTENCIA: bloquea el hilo llamante — NO usar desde UI thread.
+        // Para llamadas desde el UI thread usar HayConexionAsync.
         public bool HayConexion(string direccionweb)
         {
             try
@@ -35,7 +36,8 @@ namespace RFIDTrackBin
             }
         }
 
-        // FIX G-1: Versión async no bloqueante para usar desde UI thread.
+        // FIX G-1: Versión async no bloqueante usando HttpClient.
+        // Usar desde LoginActivity.OnCreate y cualquier contexto async.
         public async Task<bool> HayConexionAsync(string direccionweb)
         {
             try

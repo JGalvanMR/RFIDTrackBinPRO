@@ -27,7 +27,9 @@ namespace RFIDTrackBin
         {
             base.HandleMessage(msg);
 
-            // FIX MH-2: Guardia contra mensajes que llegan tras OnDestroy
+            // FIX MH-2: Guardia contra mensajes que llegan después de OnDestroy.
+            // Sin este check, _activity.GetFragment() arroja NullReferenceException
+            // si el mensaje estaba en cola cuando se destruyó la activity.
             if (_activity == null || _activity.IsDestroyed || _activity.IsFinishing)
                 return;
 
@@ -63,15 +65,21 @@ namespace RFIDTrackBin
         {
             string message = bundle.GetString(ExtraName.Text);
             bool isLongDuration = bundle.GetInt(ExtraName.Number, 1) == 1;
-            Toast.MakeText(_activity.ApplicationContext, message, isLongDuration ? ToastLength.Long : ToastLength.Short).Show();
+            Toast.MakeText(
+                _activity.ApplicationContext,
+                message,
+                isLongDuration ? ToastLength.Long : ToastLength.Short
+            ).Show();
         }
 
         void ShowDialog(Bundle dlgData)
         {
-            // FIX MH-1: Cerrar diálogo anterior antes de crear uno nuevo para evitar acumulación
+            // FIX MH-1: Cerrar el diálogo anterior antes de crear uno nuevo para evitar
+            // acumulación de AlertDialogs en memoria durante sesiones largas o si ShowDialog
+            // se llama repetidamente (p.ej. múltiples tags RFID sin catálogo).
             if (alertDialog != null && alertDialog.IsShowing)
             {
-                try { alertDialog.Dismiss(); } catch { }
+                try { alertDialog.Dismiss(); } catch { /* ignorar si ya fue cerrado */ }
             }
 
             InitAlertDlg();

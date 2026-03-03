@@ -4,7 +4,6 @@ using Android.Bluetooth;
 using Android.Content;
 using Android.Nfc;
 using Android.OS;
-using Android.Preferences;
 using Android.Runtime;
 using Android.Text;
 using Android.Util;
@@ -15,7 +14,6 @@ using AndroidX.AppCompat.Widget;
 using AndroidX.Core.App;
 using AndroidX.Fragment.App;
 using Com.Unitech.Api.Keymap;
-using Com.Unitech.Lib.Diagnositics;
 using Com.Unitech.Lib.Reader;
 using Com.Unitech.Lib.Reader.Params;
 using Com.Unitech.Lib.Rgx;
@@ -24,11 +22,11 @@ using Com.Unitech.Lib.Types;
 using Com.Unitech.Rfid;
 using Google.Android.Material.BottomNavigation;
 using Google.Android.Material.FloatingActionButton;
-using Google.Android.Material.Snackbar;
 using Java.Util;
 using RFIDTrackBin.enums;
 using RFIDTrackBin.fragment;
 using RFIDTrackBin.Helpers;
+using RFIDTrackBin.Model;
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -38,17 +36,21 @@ using System.Runtime.Remoting.Metadata.W3cXsd2001;
 using System.Text;
 using System.Threading.Tasks;
 using Toolbar = AndroidX.AppCompat.Widget.Toolbar;
-using MySql.Data.MySqlClient;
-using RFIDTrackBin.Model;
 
 namespace RFIDTrackBin
 {
     [Activity(Label = "@string/app_name", Theme = "@style/AppTheme", Exported = false)]
-    [IntentFilter(new[] { NfcAdapter.ActionNdefDiscovered, NfcAdapter.ActionTagDiscovered, Intent.CategoryDefault })]
-    public class MainActivity : AppCompatActivity, BottomNavigationView.IOnNavigationItemSelectedListener
+    [IntentFilter(new[] {
+        NfcAdapter.ActionNdefDiscovered,
+        NfcAdapter.ActionTagDiscovered,
+        Intent.CategoryDefault })]
+    public class MainActivity : AppCompatActivity,
+        BottomNavigationView.IOnNavigationItemSelectedListener
     {
-        public static string cadenaConexion = "Persist Security Info=False;user id=sa; password=Gabira1;Initial Catalog = GAB_Irapuato; server=tcp:189.206.160.206,2352; MultipleActiveResultSets=true; Connect Timeout = 0";
-        public static string cadenaConexionMySQL = "server=gab.mrlucky.com.mx;port=3306;database=campo;user id=www1166;password=taQ17Zm;";
+        public static string cadenaConexion =
+            "Persist Security Info=False;user id=sa; password=Gabira1;" +
+            "Initial Catalog = GAB_Irapuato; server=tcp:189.206.160.206,2352;" +
+            " MultipleActiveResultSets=true; Connect Timeout = 0";
 
         private const string TAG = nameof(MainActivity);
         private const int REQUEST_PERMISSION_CODE = 1000;
@@ -62,14 +64,19 @@ namespace RFIDTrackBin
         public static MainActivity Instance => instance;
 
         #region BASE DE DATOS
-        #region TABLAS
-        public DataTable Tb_RFID_Catalogo = new DataTable("Tb_RFID_Catalogo");
+        // FIX M-3: volatile garantiza visibilidad entre hilos sin lock para la asignación
+        // de referencia. Task.Run escribe, UI thread lee — sin volatile puede haber
+        // lecturas de referencias obsoletas o parcialmente construidas.
+        private volatile DataTable _tb_RFID_Catalogo = new DataTable("Tb_RFID_Catalogo");
+        public DataTable Tb_RFID_Catalogo
+        {
+            get => _tb_RFID_Catalogo;
+            private set => _tb_RFID_Catalogo = value;
+        }
 
-        // FIX M-3: volatile garantiza visibilidad entre hilos sin necesidad de lock
-        // para la asignación de referencia (Task.Run escribe, UI thread lee).
-        private volatile HashSet<string> _catalogoEPCSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private volatile HashSet<string> _catalogoEPCSet =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> CatalogoEPCSet => _catalogoEPCSet;
-        #endregion
         #endregion
 
         #region NFC
@@ -96,14 +103,14 @@ namespace RFIDTrackBin
         static string ExtraScan = "scan";
         #endregion
 
-        #region BOTON FLOTANTE PARA DAR DE BAJA CAJONES
+        #region BOTON FLOTANTE BAJA CAJONES
         private FloatingActionButton fabMain;
         private float dX, dY;
         private int lastAction;
         private int screenWidth, screenHeight;
         #endregion
 
-        #region VARIABLES PARA BAJA DE CAJONES
+        #region VARIABLES BAJA CAJONES
         private GridView gvQR;
         private List<TagLeido> qrList = new List<TagLeido>();
         private myGVitemAdapter qrAdapter;
@@ -116,6 +123,9 @@ namespace RFIDTrackBin
         public static BluetoothHelper BtHelper { get; private set; }
         public HoraServidorService.ResultadoHora Privilegios { get; set; }
 
+        private bool _isMonitoringReader = false;
+        private bool _isInitializingReader = false;
+
         protected override void OnCreate(Bundle savedInstanceState)
         {
             base.OnCreate(savedInstanceState);
@@ -123,7 +133,7 @@ namespace RFIDTrackBin
             Xamarin.Essentials.Platform.Init(this, savedInstanceState);
             SetContentView(Resource.Layout.activity_main);
 
-            #region APPLOGGER
+            #region GLOBAL EXCEPTION HANDLERS
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             {
                 AppLogger.Log("[FATAL .NET]");
@@ -144,6 +154,9 @@ namespace RFIDTrackBin
             SetSupportActionBar(toolbar);
 
             BottomNavigation = FindViewById<BottomNavigationView>(Resource.Id.navigation);
+            // FIX M-2: Listener registrado UNA sola vez aquí.
+            // La versión anterior también lo registraba en InitializeUI(), causando
+            // un segundo SetOnNavigationItemSelectedListener sobre la misma vista.
             BottomNavigation.SetOnNavigationItemSelectedListener(this);
 
             usuario = Intent.GetStringExtra("usuario") ?? "N/A";
@@ -158,18 +171,18 @@ namespace RFIDTrackBin
 
             _ = getTb_RFID_CatalogoAsync();
 
-            #region BAJA CAJONES (BOTON FLOTANTE)
+            #region BAJA CAJONES (FAB)
             if (bajaCajones == "True")
             {
                 fabMain = FindViewById<FloatingActionButton>(Resource.Id.fabMain);
-                var displayMetrics = Resources.DisplayMetrics;
-                screenWidth = displayMetrics.WidthPixels;
-                screenHeight = displayMetrics.HeightPixels;
+                var dm = Resources.DisplayMetrics;
+                screenWidth = dm.WidthPixels;
+                screenHeight = dm.HeightPixels;
                 fabMain.Touch += FabMain_Touch;
             }
             #endregion
 
-            #region NFC
+            #region NFC SETUP
             nfcAdapter = NfcAdapter.GetDefaultAdapter(this);
 
             if (nfcAdapter == null)
@@ -184,8 +197,10 @@ namespace RFIDTrackBin
                 new Intent(this, typeof(MainActivity)).AddFlags(ActivityFlags.SingleTop),
                 PendingIntentFlags.Mutable);
 
-            // FIX M-4: Eliminado new IntentFilter(Intent.CategoryDefault) — es una categoría,
-            // no una acción; usarlo como argumento de IntentFilter(string) no tiene efecto útil.
+            // FIX M-4: Eliminado new IntentFilter(Intent.CategoryDefault).
+            // Intent.CategoryDefault es una categoría, no una acción. Usarlo como
+            // argumento de IntentFilter(string action) es semánticamente incorrecto
+            // aunque no provoca crash.
             nfcIntentFilters = new IntentFilter[]
             {
                 new IntentFilter(NfcAdapter.ActionTagDiscovered),
@@ -217,288 +232,86 @@ namespace RFIDTrackBin
                 catch (Exception ex)
                 {
                     AppLogger.LogError(ex);
-                    RunOnUiThread(() => Toast.MakeText(this, "Error de hardware", ToastLength.Long).Show());
+                    RunOnUiThread(() =>
+                        Toast.MakeText(this, "Error de hardware", ToastLength.Long).Show());
                 }
             });
             #endregion
         }
 
-        #region METODOS PARA MOSTRAR Y OCULTAR ELEMENTOS UI
-        public void OcultarElementosNavegacion()
+        #region INICIALIZACION UI
+        // FIX M-2: Eliminada la segunda llamada a SetOnNavigationItemSelectedListener
+        // que existía en esta función. Ahora solo cambia el fragmento inicial.
+        private void InitializeUI()
         {
-            BottomNavigation.Visibility = ViewStates.Gone;
-        }
+            textMessage = FindViewById<TextView>(Resource.Id.message);
 
-        public void MostrarElementosNavegacion()
-        {
-            BottomNavigation.Visibility = ViewStates.Visible;
-            if (fabMain != null)
-                fabMain.Visibility = ViewStates.Visible;
-        }
-        #endregion
-
-        #region MOVIMIENTO BOTON FLOTANTE
-        private void FabMain_Touch(object sender, View.TouchEventArgs e)
-        {
-            switch (e.Event.Action)
-            {
-                case MotionEventActions.Down:
-                    dX = fabMain.GetX() - e.Event.RawX;
-                    dY = fabMain.GetY() - e.Event.RawY;
-                    lastAction = (int)e.Event.Action;
-                    break;
-
-                case MotionEventActions.Move:
-                    float newX = e.Event.RawX + dX;
-                    float newY = e.Event.RawY + dY;
-                    if (newX < 0) newX = 0;
-                    if (newX > screenWidth - fabMain.Width) newX = screenWidth - fabMain.Width;
-                    if (newY < 0) newY = 0;
-                    if (newY > screenHeight - fabMain.Height - GetNavigationBarHeight())
-                        newY = screenHeight - fabMain.Height - GetNavigationBarHeight();
-                    fabMain.Animate().X(newX).Y(newY).SetDuration(0).Start();
-                    lastAction = (int)e.Event.Action;
-                    break;
-
-                case MotionEventActions.Up:
-                    if (lastAction == (int)MotionEventActions.Down)
-                    {
-                        MostrarDialogoBajaRFID();
-                    }
-                    else
-                    {
-                        float midScreen = screenWidth / 2;
-                        float finalX = fabMain.GetX() < midScreen ? 0 : screenWidth - fabMain.Width;
-                        fabMain.Animate().X(finalX).SetDuration(200).Start();
-                    }
-                    break;
-            }
-            e.Handled = true;
-        }
-
-        private int GetNavigationBarHeight()
-        {
-            int resourceId = Resources.GetIdentifier("navigation_bar_height", "dimen", "android");
-            return resourceId > 0 ? Resources.GetDimensionPixelSize(resourceId) : 0;
+            if (SupportFragmentManager.Fragments.Count == 0 &&
+                (usuario == "DESCARGUE" || usuario == "SISTEMAS"))
+                SwitchFragment(FragmentType.Verificacion);
+            else
+                SwitchFragment(FragmentType.Inventario);
         }
         #endregion
 
-        #region MOSTRAR DIALOGO BAJA RFID
-        private void MostrarDialogoBajaRFID()
+        #region NAVEGACION
+        public bool OnNavigationItemSelected(IMenuItem item)
         {
-            if (bajaDialog != null && bajaDialog.IsShowing)
+            if (!item.IsEnabled) return false;
+
+            return item.ItemId switch
             {
-                RunOnUiThread(() =>
-                {
-                    qrAdapter?.NotifyDataSetChanged();
-                    if (qrList.Count > 0 && gvQR != null)
-                        gvQR.SetSelection(qrAdapter.Count - 1);
-                });
-                return;
-            }
-
-            LayoutInflater inflater = LayoutInflater.From(this);
-            View dialogView = inflater.Inflate(Resource.Layout.BajaRFID, null);
-
-            gvQR = dialogView.FindViewById<GridView>(Resource.Id.gvleidoBajaRFID);
-            qrAdapter = new myGVitemAdapter(this, qrList);
-            gvQR.Adapter = qrAdapter;
-            qrAdapter.NotifyDataSetChanged();
-
-            Android.App.AlertDialog.Builder builder =
-                new Android.App.AlertDialog.Builder(this, Resource.Style.AppTheme_CustomAlertDialog);
-
-            builder.SetView(dialogView);
-            builder.SetCancelable(false);
-
-            builder.SetPositiveButton("GUARDAR", async (sender, args) =>
-            {
-                if (qrList.Count > 0)
-                    await ActualizarEstatusRFIDAsync(qrList.Select(t => t.EPC).ToList());
-
-                qrList.Clear();
-                qrAdapter?.NotifyDataSetChanged();
-                bajaDialog?.Dismiss();
-                bajaDialog = null;
-                _dialogoNecesitaRefresh = false;
-
-                _ = getTb_RFID_CatalogoAsync();
-            });
-
-            builder.SetNegativeButton("CANCELAR", (sender, args) =>
-            {
-                // FIX M-5: Limpiar qrList al cancelar para evitar que tags de esta sesión
-                // aparezcan en la siguiente apertura del diálogo.
-                qrList.Clear();
-                qrAdapter?.NotifyDataSetChanged();
-                bajaDialog?.Dismiss();
-                bajaDialog = null;
-                _dialogoNecesitaRefresh = false;
-            });
-
-            bajaDialog = builder.Create();
-            bajaDialog.SetTitle($"Baja de Etiquetas RFID ({qrList.Count} escaneadas)");
-            bajaDialog.Show();
-            _dialogoNecesitaRefresh = true;
+                Resource.Id.navigation_inventario => SetFragment(FragmentType.Inventario),
+                Resource.Id.navigation_entradas => SetFragment(FragmentType.Entradas),
+                Resource.Id.navigation_salidas => SetFragment(FragmentType.Salidas),
+                _ => false
+            };
         }
 
-        private void ActualizarTituloDialogo()
+        public void SwitchFragment(FragmentType fragmentType)
         {
-            if (bajaDialog != null && bajaDialog.IsShowing)
+            AndroidX.Fragment.App.Fragment fragment = fragmentType switch
             {
-                RunOnUiThread(() =>
-                    bajaDialog.SetTitle($"Baja de Etiquetas RFID ({qrList.Count} escaneadas)"));
-            }
-        }
-        #endregion
+                FragmentType.Inventario => new InventarioFragment(),
+                FragmentType.Verificacion => new VerificacionFragment(),
+                FragmentType.Entradas => new EntradasFragment(),
+                FragmentType.Salidas => new SalidasFragment(),
+                _ => null
+            };
 
-        #region METODOS PARA SCANSERVICE
-        public void ProcessQR(string qrText)
-        {
-            string qrLimpio = qrText?.Trim();
+            if (fragment == null) return;
 
-            if (string.IsNullOrEmpty(qrLimpio))
-            {
-                Log.Warn(TAG, "QR vacío o nulo recibido");
-                return;
-            }
-
-            RunOnUiThread(() =>
-            {
-                try
-                {
-                    if (qrList.Any(t => t.EPC.Equals(qrLimpio, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        Toast.MakeText(this, "Etiqueta ya escaneada", ToastLength.Short).Show();
-                        return;
-                    }
-
-                    if (!validaQR(qrLimpio))
-                    {
-                        Toast.MakeText(this, "Etiqueta no válida o no encontrada en catálogo", ToastLength.Long).Show();
-                        return;
-                    }
-
-                    var nuevoTag = new TagLeido
-                    {
-                        EPC = qrLimpio,
-                        RSSI = 0,
-                        FechaLectura = DateTime.Now
-                    };
-
-                    qrList.Add(nuevoTag);
-
-                    if (bajaDialog != null && bajaDialog.IsShowing)
-                    {
-                        qrAdapter?.NotifyDataSetChanged();
-                        ActualizarTituloDialogo();
-                        if (gvQR != null && qrAdapter?.Count > 0)
-                            gvQR.SetSelection(qrAdapter.Count - 1);
-
-                        Toast.MakeText(this, $"Etiqueta #{qrList.Count} agregada", ToastLength.Short).Show();
-                    }
-                    else
-                    {
-                        Toast.MakeText(this, $"Etiqueta escaneada: {qrLimpio}\nTotal: {qrList.Count}", ToastLength.Short).Show();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Log.Error(TAG, $"Error en ProcessQR: {ex.Message}");
-                    Toast.MakeText(this, "Error al procesar etiqueta", ToastLength.Short).Show();
-                }
-            });
-        }
-        #endregion
-
-        #region VALIDAR LECTURA DE TAG VS CATALOGO
-        private bool validaQR(string EPC)
-        {
-            try
-            {
-                if (_catalogoEPCSet == null || _catalogoEPCSet.Count == 0)
-                {
-                    Log.Warn(TAG, "Catálogo vacío, recargando...");
-                    _ = getTb_RFID_CatalogoAsync();
-                    return false;
-                }
-
-                return _catalogoEPCSet.Contains(EPC.Trim());
-            }
-            catch (Exception ex)
-            {
-                Log.Error(TAG, $"Error en validaQR: {ex.Message}");
-                return false;
-            }
-        }
-        #endregion
-
-        #region ACTUALIZAR BAJA DE CAJONES
-        private async Task ActualizarEstatusRFIDAsync(List<string> qrListEPCs)
-        {
-            if (qrListEPCs == null || qrListEPCs.Count == 0)
-            {
-                Toast.MakeText(this, "No hay etiquetas para actualizar", ToastLength.Short).Show();
-                return;
-            }
-
-            try
-            {
-                int filasAfectadas = await Task.Run(() =>
-                {
-                    using (SqlConnection conn = new SqlConnection(cadenaConexion))
-                    {
-                        conn.Open();
-                        var parametros = string.Join(",", qrListEPCs.Select((qr, i) => $"@p{i}"));
-                        string query = $"UPDATE Tb_RFID_Catalogo SET IdStatus = '2' WHERE IdClaveInt IN ({parametros})";
-
-                        using (SqlCommand cmd = new SqlCommand(query, conn))
-                        {
-                            for (int i = 0; i < qrListEPCs.Count; i++)
-                                cmd.Parameters.AddWithValue($"@p{i}", qrListEPCs[i]);
-
-                            return cmd.ExecuteNonQuery();
-                        }
-                    }
-                });
-
-                RunOnUiThread(() =>
-                    Toast.MakeText(this, $"{filasAfectadas} registros actualizados", ToastLength.Long).Show());
-            }
-            catch (Exception ex)
-            {
-                RunOnUiThread(() =>
-                    Toast.MakeText(this, "Error al actualizar: " + ex.Message, ToastLength.Long).Show());
-            }
-        }
-        #endregion
-
-        #region REGLA DE HORARIO DE INVENTARIO
-        private async Task AjustarItemsSegunServidorAsync()
-        {
-            var resultado = await HoraServidorService.ObtenerAsync();
-            if (resultado == null)
-            {
-                Toast.MakeText(this, "Sin conexión con el servidor horario.", ToastLength.Short).Show();
-                return;
-            }
-
-            this.Privilegios = resultado;
-
-            var menu = BottomNavigation.Menu;
-            menu.FindItem(Resource.Id.navigation_inventario)?.SetVisible(resultado.MostrarInventario);
-            menu.FindItem(Resource.Id.navigation_entradas)?.SetVisible(resultado.MostrarEntradas);
-            menu.FindItem(Resource.Id.navigation_salidas)?.SetVisible(resultado.MostrarSalidas);
-        }
-        #endregion
-
-        protected override void OnActivityResult(int requestCode, Result resultCode, Intent data)
-        {
-            base.OnActivityResult(requestCode, resultCode, data);
-            BtHelper?.OnActivityResult(requestCode, resultCode);
+            SupportFragmentManager.BeginTransaction()
+                .Replace(Resource.Id.fragment_container, fragment)
+                .Commit();
         }
 
-        #region METODOS PARA BOTTOMNAVIGATIONVIEW
+        private bool SetFragment(FragmentType type)
+        {
+            SwitchFragment(type);
+            return true;
+        }
+
+        public BaseFragment GetFragment(FragmentType fragmentType)
+        {
+            Type type = fragmentType switch
+            {
+                FragmentType.Entradas => typeof(EntradasFragment),
+                FragmentType.Salidas => typeof(SalidasFragment),
+                FragmentType.Inventario => typeof(InventarioFragment),
+                FragmentType.Verificacion => typeof(VerificacionFragment),
+                _ => null
+            };
+
+            if (type == null) return null;
+
+            foreach (var fragment in SupportFragmentManager.Fragments)
+                if (fragment.GetType() == type)
+                    return (BaseFragment)fragment;
+
+            return null;
+        }
+
         public void DisableNavigationItems(params int[] itemIds)
         {
             if (BottomNavigation == null) return;
@@ -528,27 +341,14 @@ namespace RFIDTrackBin
                     BottomNavigation.Menu.FindItem(itemId)?.SetEnabled(true);
             }
         }
-
-        public bool OnNavigationItemSelected(IMenuItem item)
-        {
-            if (!item.IsEnabled) return false;
-
-            return item.ItemId switch
-            {
-                Resource.Id.navigation_inventario => SetFragment(FragmentType.Inventario),
-                Resource.Id.navigation_entradas => SetFragment(FragmentType.Entradas),
-                Resource.Id.navigation_salidas => SetFragment(FragmentType.Salidas),
-                _ => false
-            };
-        }
         #endregion
 
-        #region METODOS RFID CENTRALIZADO
+        #region RFID READER
         public async Task InitializeReader()
         {
             if (_isInitializingReader) return;
-
             _isInitializingReader = true;
+
             try
             {
                 if (baseReader != null)
@@ -567,7 +367,8 @@ namespace RFIDTrackBin
                     await Task.Delay(100);
                     intentos++;
 
-                    if (baseReader.State == ConnectState.Connected && baseReader.RfidUhf != null)
+                    if (baseReader.State == ConnectState.Connected &&
+                        baseReader.RfidUhf != null)
                     {
                         IsReaderConnected = true;
                         ConfigureGunKeyCode();
@@ -602,6 +403,10 @@ namespace RFIDTrackBin
                 {
                     if (fragment is InventarioFragment inv)
                     {
+                        // FIX I-2 / V-2: RemoveListener antes de AddListener para evitar
+                        // acumulación de referencias que causa procesamiento duplicado de tags.
+                        baseReader.RemoveListener(inv);
+                        baseReader.RfidUhf.RemoveListener(inv);
                         baseReader.AddListener(inv);
                         baseReader.RfidUhf.AddListener(inv);
                         inv.InitSetting();
@@ -609,6 +414,8 @@ namespace RFIDTrackBin
                     }
                     else if (fragment is VerificacionFragment ver)
                     {
+                        baseReader.RemoveListener(ver);
+                        baseReader.RfidUhf.RemoveListener(ver);
                         baseReader.AddListener(ver);
                         baseReader.RfidUhf.AddListener(ver);
                         ver.InitSetting();
@@ -616,6 +423,8 @@ namespace RFIDTrackBin
                     }
                     else if (fragment is SalidasFragment sal)
                     {
+                        baseReader.RemoveListener(sal);
+                        baseReader.RfidUhf.RemoveListener(sal);
                         baseReader.AddListener(sal);
                         baseReader.RfidUhf.AddListener(sal);
                         sal.InitSetting();
@@ -623,6 +432,8 @@ namespace RFIDTrackBin
                     }
                     else if (fragment is EntradasFragment ent)
                     {
+                        baseReader.RemoveListener(ent);
+                        baseReader.RfidUhf.RemoveListener(ent);
                         baseReader.AddListener(ent);
                         baseReader.RfidUhf.AddListener(ent);
                         ent.InitSetting();
@@ -636,31 +447,10 @@ namespace RFIDTrackBin
             });
         }
 
-        private bool AssertAntennaConnectionSafe()
-        {
-            try
-            {
-                if (baseReader == null || baseReader.RfidUhf == null) return false;
-                int power = baseReader.RfidUhf.Power;
-                Log.Debug(TAG, $"Antena conectada, potencia: {power}");
-                return true;
-            }
-            catch (Exception e)
-            {
-                Log.Error(TAG, $"Antena desconectada: {e.Message}");
-                return false;
-            }
-        }
-
-        private bool _isMonitoringReader = false;
-        private bool _isInitializingReader = false;
-
         private async Task MonitorReaderStatus()
         {
             if (_isMonitoringReader || baseReader == null) return;
-
             _isMonitoringReader = true;
-            Log.Debug("MainActivity", "Monitoreando lector...");
 
             while (_isMonitoringReader && !IsDestroyed)
             {
@@ -684,8 +474,7 @@ namespace RFIDTrackBin
 
         private void ConfigureGunKeyCode()
         {
-            string keyName = "";
-            string keyCode = "";
+            string keyName = "", keyCode = "";
 
             switch (Build.Device)
             {
@@ -698,32 +487,22 @@ namespace RFIDTrackBin
 
             sendUssScan(false);
 
-            Log.Debug("MainActivity", "Export keyMappings");
-            Bundle exportBundle = KeymappingCtrl.GetInstance(ApplicationContext).ExportKeyMappings(getKeymappingPath());
-            Log.Debug("MainActivity", "Export keyMappings, result: " + exportBundle.GetString("errorMsg"));
+            var ctx = ApplicationContext;
+            KeymappingCtrl.GetInstance(ctx).ExportKeyMappings(getKeymappingPath());
+            KeymappingCtrl.GetInstance(ctx).EnableKeyMapping(true);
+            tempKeyCode = KeymappingCtrl.GetInstance(ctx).GetKeyMapping(keyName);
 
-            Log.Debug("MainActivity", "Enable KeyMapping");
-            Bundle enableBundle = KeymappingCtrl.GetInstance(ApplicationContext).EnableKeyMapping(true);
-            Log.Debug("MainActivity", "Enable KeyMapping, result: " + enableBundle.GetString("errorMsg"));
-
-            tempKeyCode = KeymappingCtrl.GetInstance(ApplicationContext).GetKeyMapping(keyName);
-
-            Log.Debug("MainActivity", "Set Gun Key Code: " + keyCode);
             bool wakeup = tempKeyCode.GetBoolean("wakeUp");
-            Bundle[] broadcastDownParams = getParams(tempKeyCode.GetBundle("broadcastDownParams"));
-            Bundle[] broadcastUpParams = getParams(tempKeyCode.GetBundle("broadcastUpParams"));
-            Bundle[] startActivityParams = getParams(tempKeyCode.GetBundle("startActivityParams"));
-
-            Bundle resultBundle = KeymappingCtrl.GetInstance(ApplicationContext).AddKeyMappings(
+            Bundle result = KeymappingCtrl.GetInstance(ctx).AddKeyMappings(
                 keyName, keyCode, wakeup,
-                MainReceiver.rfidGunPressed, broadcastDownParams,
-                MainReceiver.rfidGunReleased, broadcastUpParams,
-                startActivityParams);
+                MainReceiver.rfidGunPressed, getParams(tempKeyCode.GetBundle("broadcastDownParams")),
+                MainReceiver.rfidGunReleased, getParams(tempKeyCode.GetBundle("broadcastUpParams")),
+                getParams(tempKeyCode.GetBundle("startActivityParams")));
 
-            if (resultBundle.GetInt("errorCode") == 0)
+            if (result.GetInt("errorCode") == 0)
                 Log.Debug("MainActivity", "Set Gun Key Code success");
             else
-                Log.Error("MainActivity", "Set Gun Key Code failed: " + resultBundle.GetString("errorMsg"));
+                Log.Error("MainActivity", "Set Gun Key Code failed: " + result.GetString("errorMsg"));
         }
 
         private void sendUssScan(bool enable)
@@ -735,11 +514,8 @@ namespace RFIDTrackBin
         }
 
         private string getKeymappingPath()
-        {
-            return Build.VERSION.SdkInt >= BuildVersionCodes.Kitkat
-                ? android12keymappingPath
-                : keymappingPath;
-        }
+            => Build.VERSION.SdkInt >= BuildVersionCodes.Kitkat
+                ? android12keymappingPath : keymappingPath;
 
         private Bundle[] getParams(Bundle bundle)
         {
@@ -754,45 +530,6 @@ namespace RFIDTrackBin
                 paramArray[i++] = tmp;
             }
             return paramArray;
-        }
-
-        protected override void OnDestroy()
-        {
-            _isMonitoringReader = false;
-
-            instance = null;
-
-            // FIX M-1: Nular _handler para romper la referencia circular estática
-            // que impedía que el GC recolectara la activity con sus Views y Fragments.
-            _handler = null;
-
-            if (baseReader != null)
-            {
-                try
-                {
-                    baseReader.RfidUhf?.Stop();
-                    baseReader.Disconnect();
-                }
-                catch { }
-                finally
-                {
-                    baseReader = null;
-                    IsReaderConnected = false;
-                }
-            }
-
-            base.OnDestroy();
-        }
-
-        public void AssertReader()
-        {
-            if (baseReader == null || !IsReaderConnected)
-                throw new Exception("Lector RFID no conectado");
-
-            if (baseReader.State != ConnectState.Connected)
-                throw new Exception("Lector RFID no conectado");
-
-            AssertAntennaConnectionSafe();
         }
 
         public bool TryAssertReader()
@@ -835,75 +572,6 @@ namespace RFIDTrackBin
         }
         #endregion
 
-        #region NFC / OnResume / OnPause
-        protected override void OnResume()
-        {
-            base.OnResume();
-            if (bajaCajones == "True" && fabMain != null)
-            {
-                fabMain.BringToFront();
-                fabMain.Visibility = ViewStates.Visible;
-            }
-
-            if (baseReader == null && !_isMonitoringReader && !_isInitializingReader)
-            {
-                Task.Run(async () =>
-                {
-                    try
-                    {
-                        await InitializeReader();
-                        if (IsReaderConnected)
-                        {
-                            AppLogger.Log("Lector reconectado en OnResume.");
-                            _ = Task.Run(() => MonitorReaderStatus());
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        AppLogger.LogError(ex);
-                    }
-                });
-            }
-        }
-
-        protected override void OnNewIntent(Intent intent)
-        {
-            base.OnNewIntent(intent);
-
-            string action = intent.Action;
-
-            if (NfcAdapter.ActionTagDiscovered.Equals(action) ||
-                NfcAdapter.ActionNdefDiscovered.Equals(action) ||
-                NfcAdapter.ActionTechDiscovered.Equals(action))
-            {
-                var tag = intent.GetParcelableExtra(NfcAdapter.ExtraTag) as Tag;
-                if (tag != null)
-                {
-                    string tagId = BitConverter.ToString(tag.GetId()).Replace("-", "");
-                    Toast.MakeText(this, "TAG detectado: " + tagId, ToastLength.Short).Show();
-
-                    var currentFragment = SupportFragmentManager.Fragments
-                        .FirstOrDefault(f => f.IsVisible && f is BaseFragment) as BaseFragment;
-
-                    currentFragment?.OnNfcTagScanned(tagId);
-                }
-            }
-        }
-
-        private static string LittleEndian(string num)
-        {
-            var number = Convert.ToInt64(num, 16);
-            var bytes = BitConverter.GetBytes(number);
-            return bytes.Aggregate("", (current, b) => current + b.ToString("X2"));
-        }
-
-        public static string ByteArrayToString(byte[] ba)
-        {
-            var shb = new SoapHexBinary(ba);
-            return shb.ToString();
-        }
-        #endregion
-
         #region CATALOGOS
         public async Task getTb_RFID_CatalogoAsync()
         {
@@ -911,11 +579,12 @@ namespace RFIDTrackBin
             {
                 var (tabla, set) = await Task.Run(() =>
                 {
-                    const string query = "SELECT * FROM Tb_RFID_Catalogo WHERE IdStatus = 1 ORDER BY IdClaveInt";
+                    const string query =
+                        "SELECT * FROM Tb_RFID_Catalogo WHERE IdStatus = 1 ORDER BY IdClaveInt";
                     var dt = new DataTable("Tb_RFID_Catalogo");
 
-                    using (SqlConnection conn = new SqlConnection(cadenaConexion))
-                    using (SqlDataAdapter da = new SqlDataAdapter(query, conn))
+                    using (var conn = new SqlConnection(cadenaConexion))
+                    using (var da = new SqlDataAdapter(query, conn))
                         da.Fill(dt);
 
                     var hashSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -932,16 +601,13 @@ namespace RFIDTrackBin
                 });
 
                 // FIX M-3: Asignación atómica de referencias volatile.
-                // El lector de UI thread siempre verá el objeto completo o el anterior,
-                // nunca un objeto a medio construir.
-                Tb_RFID_Catalogo = tabla;
+                // La UI siempre verá el objeto completo o el anterior, nunca un estado intermedio.
+                _tb_RFID_Catalogo = tabla;
                 _catalogoEPCSet = set;
 
                 if (tabla.Rows.Count == 0)
-                {
                     RunOnUiThread(() =>
                         Toast.MakeText(this, "Catálogo vacío o no disponible", ToastLength.Short).Show());
-                }
             }
             catch (SqlException sqlEx)
             {
@@ -955,25 +621,247 @@ namespace RFIDTrackBin
             }
         }
 
+        // Wrapper síncrono para compatibilidad con código que no puede usar await.
         public void getTb_RFID_Catalogo() => _ = getTb_RFID_CatalogoAsync();
         #endregion
 
-        // FIX M-2: Eliminada la segunda llamada a SetOnNavigationItemSelectedListener.
-        // Solo se registra en OnCreate (donde BottomNavigation ya está asignado).
-        private void InitializeUI()
+        #region SCANNER QR (BAJA CAJONES)
+        public void ProcessQR(string qrText)
         {
-            textMessage = FindViewById<TextView>(Resource.Id.message);
-            // FIX M-2: Eliminado navigation.SetOnNavigationItemSelectedListener(this)
-            // que duplicaba el registro hecho en OnCreate.
-
-            if (SupportFragmentManager.Fragments.Count == 0 &&
-                (usuario == "DESCARGUE" || usuario == "SISTEMAS"))
+            string qrLimpio = qrText?.Trim();
+            if (string.IsNullOrEmpty(qrLimpio))
             {
-                SwitchFragment(FragmentType.Verificacion);
+                Log.Warn(TAG, "QR vacío o nulo recibido");
+                return;
             }
-            else
+
+            RunOnUiThread(() =>
             {
-                SwitchFragment(FragmentType.Inventario);
+                try
+                {
+                    if (qrList.Any(t => t.EPC.Equals(qrLimpio, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        Toast.MakeText(this, "Etiqueta ya escaneada", ToastLength.Short).Show();
+                        return;
+                    }
+
+                    if (!validaQR(qrLimpio))
+                    {
+                        Toast.MakeText(this, "Etiqueta no válida o no encontrada en catálogo",
+                            ToastLength.Long).Show();
+                        return;
+                    }
+
+                    var nuevoTag = new TagLeido
+                    {
+                        EPC = qrLimpio,
+                        RSSI = 0,
+                        FechaLectura = DateTime.Now
+                    };
+
+                    qrList.Add(nuevoTag);
+
+                    if (bajaDialog != null && bajaDialog.IsShowing)
+                    {
+                        qrAdapter?.NotifyDataSetChanged();
+                        ActualizarTituloDialogo();
+                        if (gvQR != null && qrAdapter?.Count > 0)
+                            gvQR.SetSelection(qrAdapter.Count - 1);
+                        Toast.MakeText(this, $"Etiqueta #{qrList.Count} agregada", ToastLength.Short).Show();
+                    }
+                    else
+                    {
+                        Toast.MakeText(this, $"Etiqueta escaneada: {qrLimpio}\nTotal: {qrList.Count}",
+                            ToastLength.Short).Show();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(TAG, $"Error en ProcessQR: {ex.Message}");
+                    Toast.MakeText(this, "Error al procesar etiqueta", ToastLength.Short).Show();
+                }
+            });
+        }
+
+        private bool validaQR(string EPC)
+        {
+            if (_catalogoEPCSet == null || _catalogoEPCSet.Count == 0)
+            {
+                _ = getTb_RFID_CatalogoAsync();
+                return false;
+            }
+            return _catalogoEPCSet.Contains(EPC.Trim());
+        }
+        #endregion
+
+        #region DIALOGO BAJA RFID
+        private void MostrarDialogoBajaRFID()
+        {
+            if (bajaDialog != null && bajaDialog.IsShowing)
+            {
+                RunOnUiThread(() =>
+                {
+                    qrAdapter?.NotifyDataSetChanged();
+                    if (qrList.Count > 0 && gvQR != null)
+                        gvQR.SetSelection(qrAdapter.Count - 1);
+                });
+                return;
+            }
+
+            LayoutInflater inflater = LayoutInflater.From(this);
+            View dialogView = inflater.Inflate(Resource.Layout.BajaRFID, null);
+
+            gvQR = dialogView.FindViewById<GridView>(Resource.Id.gvleidoBajaRFID);
+            qrAdapter = new myGVitemAdapter(this, qrList);
+            gvQR.Adapter = qrAdapter;
+            qrAdapter.NotifyDataSetChanged();
+
+            var builder = new Android.App.AlertDialog.Builder(
+                this, Resource.Style.AppTheme_CustomAlertDialog);
+            builder.SetView(dialogView);
+            builder.SetCancelable(false);
+
+            builder.SetPositiveButton("GUARDAR", async (sender, args) =>
+            {
+                if (qrList.Count > 0)
+                    await ActualizarEstatusRFIDAsync(qrList.Select(t => t.EPC).ToList());
+
+                qrList.Clear();
+                qrAdapter?.NotifyDataSetChanged();
+                bajaDialog?.Dismiss();
+                bajaDialog = null;
+                _dialogoNecesitaRefresh = false;
+                _ = getTb_RFID_CatalogoAsync();
+            });
+
+            builder.SetNegativeButton("CANCELAR", (sender, args) =>
+            {
+                // FIX M-5: Limpiar qrList al cancelar para evitar que tags de esta sesión
+                // aparezcan en la siguiente apertura del diálogo.
+                qrList.Clear();
+                qrAdapter?.NotifyDataSetChanged();
+                bajaDialog?.Dismiss();
+                bajaDialog = null;
+                _dialogoNecesitaRefresh = false;
+            });
+
+            bajaDialog = builder.Create();
+            bajaDialog.SetTitle($"Baja de Etiquetas RFID ({qrList.Count} escaneadas)");
+            bajaDialog.Show();
+            _dialogoNecesitaRefresh = true;
+        }
+
+        private void ActualizarTituloDialogo()
+        {
+            if (bajaDialog != null && bajaDialog.IsShowing)
+                RunOnUiThread(() =>
+                    bajaDialog.SetTitle($"Baja de Etiquetas RFID ({qrList.Count} escaneadas)"));
+        }
+
+        private async Task ActualizarEstatusRFIDAsync(List<string> epcs)
+        {
+            if (epcs == null || epcs.Count == 0) return;
+
+            try
+            {
+                int filasAfectadas = await Task.Run(() =>
+                {
+                    using (var conn = new SqlConnection(cadenaConexion))
+                    {
+                        conn.Open();
+                        var parametros = string.Join(",", epcs.Select((epc, i) => $"@p{i}"));
+                        string query = $"UPDATE Tb_RFID_Catalogo SET IdStatus = '2' " +
+                                       $"WHERE IdClaveInt IN ({parametros})";
+
+                        using (var cmd = new SqlCommand(query, conn))
+                        {
+                            for (int i = 0; i < epcs.Count; i++)
+                                cmd.Parameters.AddWithValue($"@p{i}", epcs[i]);
+                            return cmd.ExecuteNonQuery();
+                        }
+                    }
+                });
+
+                RunOnUiThread(() =>
+                    Toast.MakeText(this, $"{filasAfectadas} registros actualizados",
+                        ToastLength.Long).Show());
+            }
+            catch (Exception ex)
+            {
+                RunOnUiThread(() =>
+                    Toast.MakeText(this, "Error al actualizar: " + ex.Message,
+                        ToastLength.Long).Show());
+            }
+        }
+        #endregion
+
+        #region FAB DRAG
+        private void FabMain_Touch(object sender, View.TouchEventArgs e)
+        {
+            switch (e.Event.Action)
+            {
+                case MotionEventActions.Down:
+                    dX = fabMain.GetX() - e.Event.RawX;
+                    dY = fabMain.GetY() - e.Event.RawY;
+                    lastAction = (int)e.Event.Action;
+                    break;
+
+                case MotionEventActions.Move:
+                    float newX = e.Event.RawX + dX;
+                    float newY = e.Event.RawY + dY;
+                    if (newX < 0) newX = 0;
+                    if (newX > screenWidth - fabMain.Width) newX = screenWidth - fabMain.Width;
+                    if (newY < 0) newY = 0;
+                    if (newY > screenHeight - fabMain.Height - GetNavigationBarHeight())
+                        newY = screenHeight - fabMain.Height - GetNavigationBarHeight();
+                    fabMain.Animate().X(newX).Y(newY).SetDuration(0).Start();
+                    lastAction = (int)e.Event.Action;
+                    break;
+
+                case MotionEventActions.Up:
+                    if (lastAction == (int)MotionEventActions.Down)
+                        MostrarDialogoBajaRFID();
+                    else
+                    {
+                        float midScreen = screenWidth / 2f;
+                        float finalX = fabMain.GetX() < midScreen ? 0 : screenWidth - fabMain.Width;
+                        fabMain.Animate().X(finalX).SetDuration(200).Start();
+                    }
+                    break;
+            }
+            e.Handled = true;
+        }
+
+        private int GetNavigationBarHeight()
+        {
+            int resourceId = Resources.GetIdentifier("navigation_bar_height", "dimen", "android");
+            return resourceId > 0 ? Resources.GetDimensionPixelSize(resourceId) : 0;
+        }
+        #endregion
+
+        #region LIFECYCLE
+        protected override void OnResume()
+        {
+            base.OnResume();
+
+            if (bajaCajones == "True" && fabMain != null)
+            {
+                fabMain.BringToFront();
+                fabMain.Visibility = ViewStates.Visible;
+            }
+
+            if (baseReader == null && !_isMonitoringReader && !_isInitializingReader)
+            {
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await InitializeReader();
+                        if (IsReaderConnected)
+                            _ = Task.Run(() => MonitorReaderStatus());
+                    }
+                    catch (Exception ex) { AppLogger.LogError(ex); }
+                });
             }
         }
 
@@ -989,11 +877,68 @@ namespace RFIDTrackBin
 
             if (baseReader != null)
             {
-                baseReader.RfidUhf?.Stop();
-                baseReader.Disconnect();
-                baseReader = null;
+                try
+                {
+                    baseReader.RfidUhf?.Stop();
+                    baseReader.Disconnect();
+                }
+                catch { }
+                finally { baseReader = null; }
             }
+
             base.OnStop();
+        }
+
+        protected override void OnDestroy()
+        {
+            _isMonitoringReader = false;
+
+            instance = null;
+
+            // FIX M-1: Nular _handler para romper la referencia circular estática.
+            // Sin esta línea, _handler retiene una referencia fuerte a la activity destruida,
+            // con todos sus Views y Fragments, impidiendo que el GC la recolecte.
+            _handler = null;
+
+            if (baseReader != null)
+            {
+                try
+                {
+                    baseReader.RfidUhf?.Stop();
+                    baseReader.Disconnect();
+                }
+                catch { }
+                finally
+                {
+                    baseReader = null;
+                    IsReaderConnected = false;
+                }
+            }
+
+            base.OnDestroy();
+        }
+
+        protected override void OnNewIntent(Intent intent)
+        {
+            base.OnNewIntent(intent);
+
+            string action = intent.Action;
+
+            if (NfcAdapter.ActionTagDiscovered.Equals(action) ||
+                NfcAdapter.ActionNdefDiscovered.Equals(action) ||
+                NfcAdapter.ActionTechDiscovered.Equals(action))
+            {
+                var tag = intent.GetParcelableExtra(NfcAdapter.ExtraTag) as Android.Nfc.Tag;
+                if (tag != null)
+                {
+                    string tagId = BitConverter.ToString(tag.GetId()).Replace("-", "");
+                    Toast.MakeText(this, "TAG detectado: " + tagId, ToastLength.Short).Show();
+
+                    var currentFragment = SupportFragmentManager.Fragments
+                        .FirstOrDefault(f => f.IsVisible && f is BaseFragment) as BaseFragment;
+                    currentFragment?.OnNfcTagScanned(tagId);
+                }
+            }
         }
 
         public override void OnBackPressed()
@@ -1024,25 +969,23 @@ namespace RFIDTrackBin
                 {
                     baseReader.RfidUhf?.Stop();
                     baseReader.Disconnect();
-                    if (baseReader is IDisposable disposable)
-                        disposable.Dispose();
+                    if (baseReader is IDisposable d) d.Dispose();
                 }
-                catch (Exception ex)
-                {
-                    Android.Util.Log.Error("RFID", $"Error cerrando baseReader: {ex.Message}");
-                }
+                catch { }
                 finally { baseReader = null; }
             }
 
-            foreach (var fragment in SupportFragmentManager.Fragments)
-                SupportFragmentManager.BeginTransaction().Remove(fragment).CommitAllowingStateLoss();
+            foreach (var f in SupportFragmentManager.Fragments)
+                SupportFragmentManager.BeginTransaction().Remove(f).CommitAllowingStateLoss();
 
             var intent = PackageManager.GetLaunchIntentForPackage(PackageName);
             intent.AddFlags(ActivityFlags.ClearTop | ActivityFlags.NewTask | ActivityFlags.ClearTask);
             StartActivity(intent);
             Finish();
         }
+        #endregion
 
+        #region PERMISOS / BLUETOOTH
         private void CheckAndRequestPermissions()
         {
             string[] requiredPermissions =
@@ -1051,17 +994,18 @@ namespace RFIDTrackBin
                 Manifest.Permission.AccessCoarseLocation
             };
 
-            var missingPermissions = requiredPermissions
+            var missing = requiredPermissions
                 .Where(p => CheckSelfPermission(p) == Android.Content.PM.Permission.Denied)
                 .ToList();
 
-            if (missingPermissions.Count > 0)
-                ActivityCompat.RequestPermissions(this, missingPermissions.ToArray(), REQUEST_PERMISSION_CODE);
+            if (missing.Count > 0)
+                ActivityCompat.RequestPermissions(this, missing.ToArray(), REQUEST_PERMISSION_CODE);
             else
                 CheckBluetooth();
         }
 
-        public override void OnRequestPermissionsResult(int requestCode, string[] permissions,
+        public override void OnRequestPermissionsResult(
+            int requestCode, string[] permissions,
             [GeneratedEnum] Android.Content.PM.Permission[] grantResults)
         {
             base.OnRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -1069,8 +1013,8 @@ namespace RFIDTrackBin
 
             if (requestCode == REQUEST_PERMISSION_CODE)
             {
-                bool allGranted = Array.TrueForAll(grantResults,
-                    result => result == Android.Content.PM.Permission.Granted);
+                bool allGranted = Array.TrueForAll(
+                    grantResults, r => r == Android.Content.PM.Permission.Granted);
                 if (allGranted) CheckBluetooth();
                 else Finish();
             }
@@ -1083,53 +1027,36 @@ namespace RFIDTrackBin
                 bluetoothAdapter.Enable();
         }
 
-        public void SwitchFragment(FragmentType fragmentType)
+        protected override void OnActivityResult(int requestCode, Result resultCode, Intent data)
         {
-            AndroidX.Fragment.App.Fragment fragment = fragmentType switch
-            {
-                FragmentType.Inventario => new InventarioFragment(),
-                FragmentType.Verificacion => new VerificacionFragment(),
-                FragmentType.Entradas => new EntradasFragment(),
-                FragmentType.Salidas => new SalidasFragment(),
-                _ => null
-            };
+            base.OnActivityResult(requestCode, resultCode, data);
+            BtHelper?.OnActivityResult(requestCode, resultCode);
+        }
+        #endregion
 
-            SupportFragmentManager.BeginTransaction()
-                .Replace(Resource.Id.fragment_container, fragment)
-                .Commit();
+        #region HELPERS UI / NAVIGATION VISIBILITY
+        public void OcultarElementosNavegacion()
+        {
+            BottomNavigation.Visibility = ViewStates.Gone;
         }
 
-        private bool SetFragment(FragmentType type)
+        public void MostrarElementosNavegacion()
         {
-            SwitchFragment(type);
-            return true;
+            BottomNavigation.Visibility = ViewStates.Visible;
+            if (fabMain != null) fabMain.Visibility = ViewStates.Visible;
         }
+        #endregion
 
-        public BaseFragment GetFragment(FragmentType fragmentType)
-        {
-            Type type = fragmentType switch
-            {
-                FragmentType.Entradas => typeof(EntradasFragment),
-                FragmentType.Salidas => typeof(SalidasFragment),
-                FragmentType.Inventario => typeof(InventarioFragment),
-                FragmentType.Verificacion => typeof(VerificacionFragment),
-                _ => null
-            };
-
-            if (type == null) return null;
-
-            foreach (var fragment in SupportFragmentManager.Fragments)
-                if (fragment.GetType() == type)
-                    return (BaseFragment)fragment;
-
-            return null;
-        }
-
+        #region STATIC HELPERS
         public static MainActivity getInstance() => instance;
 
         public static void ShowToast(string msg, bool lengthLong)
         {
-            Message handlerMessage = new Message { What = (int)FragmentType.None, Data = new Bundle() };
+            Message handlerMessage = new Message
+            {
+                What = (int)FragmentType.None,
+                Data = new Bundle()
+            };
             handlerMessage.Data.PutInt(ExtraName.HandleMsg, (int)HandlerMsg.Toast);
             handlerMessage.Data.PutString(ExtraName.Text, msg);
             handlerMessage.Data.PutInt(ExtraName.Number, lengthLong ? 1 : 0);
@@ -1140,7 +1067,11 @@ namespace RFIDTrackBin
 
         public static void ShowDialog(string title, string msg)
         {
-            Message handlerMessage = new Message { What = (int)FragmentType.None, Data = new Bundle() };
+            Message handlerMessage = new Message
+            {
+                What = (int)FragmentType.None,
+                Data = new Bundle()
+            };
             handlerMessage.Data.PutString(ExtraName.Title, title);
             handlerMessage.Data.PutString(ExtraName.Text, msg);
             handlerMessage.Data.PutInt(ExtraName.HandleMsg, (int)HandlerMsg.Dialog);
@@ -1161,5 +1092,12 @@ namespace RFIDTrackBin
             if (_handler == null)
                 throw new Exception("Handler is not ready");
         }
+
+        public static string ByteArrayToString(byte[] ba)
+        {
+            var shb = new SoapHexBinary(ba);
+            return shb.ToString();
+        }
+        #endregion
     }
 }

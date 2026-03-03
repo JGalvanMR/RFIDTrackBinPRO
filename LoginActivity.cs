@@ -26,27 +26,25 @@ using System.Data;
 using System.Data.SqlClient;
 using System.Linq;
 using System.Net;
-using System.Runtime.Remoting.Contexts;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
-using static Android.App.DownloadManager;
 
 namespace RFIDTrackBin
 {
     [Activity(Label = "@string/app_name", Theme = "@style/AppTheme", MainLauncher = true, Exported = true)]
     public class LoginActivity : AppCompatActivity
     {
-        public static string cadenaConexionLogin = "Persist Security Info=False;user id=sa; password=Gabira1;Initial Catalog = GAB_Irapuato; server=tcp:189.206.160.206,2352; MultipleActiveResultSets=true; Connect Timeout = 0";
+        public static string cadenaConexionLogin =
+            "Persist Security Info=False;user id=sa; password=Gabira1;" +
+            "Initial Catalog = GAB_Irapuato; server=tcp:189.206.160.206,2352;" +
+            " MultipleActiveResultSets=true; Connect Timeout = 0";
 
         EditText txtUsuario, txtContrasena;
         Button btnLogin;
 
         #region BASE DE DATOS LOGIN
         DataSet dsLogin = new DataSet();
-        #region TABLAS LOGIN
         public DataTable Tb_RFID_Usuarios = new DataTable("Tb_RFID_Usuarios");
-        #endregion
         #endregion
 
         #region NFC
@@ -70,7 +68,6 @@ namespace RFIDTrackBin
 
         #region Spinner
         Spinner sprUsuarios;
-        string query = "";
         public static DataTable responsables = new DataTable("responsables");
         System.String[] strFrutas;
         ArrayAdapter<System.String> comboAdapter;
@@ -97,7 +94,9 @@ namespace RFIDTrackBin
 
             imei = getDeviceID();
 
-            // FIX L-2: Inicialización de datos movida a método async para no bloquear UI thread.
+            // FIX L-2: Toda la inicialización de red/BD movida a método async.
+            // La versión anterior bloqueaba el UI thread con validaservidores(),
+            // da.Fill() y getData() ejecutados directamente en OnCreate.
             _ = InicializarAsync();
 
             #region NFC SETUP
@@ -109,13 +108,13 @@ namespace RFIDTrackBin
             }
             else
             {
-                pendingIntent = PendingIntent.GetActivity(this, 0,
+                pendingIntent = PendingIntent.GetActivity(
+                    this, 0,
                     new Intent(this, typeof(LoginActivity)).AddFlags(ActivityFlags.SingleTop),
                     PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Mutable);
 
                 IntentFilter ndefDetected = new IntentFilter(NfcAdapter.ActionTechDiscovered);
                 intentFiltersArray = new IntentFilter[] { ndefDetected };
-
                 techListsArray = new string[][] {
                     new string[] { Java.Lang.Class.FromType(typeof(NfcA)).Name }
                 };
@@ -126,12 +125,16 @@ namespace RFIDTrackBin
             {
                 if (responsablesplit == "Seleccione un Responsable")
                 {
-                    Toast.MakeText(this, "Por favor, asegurese de seleccionar un responsable y volver a intentarlo", ToastLength.Long).Show();
+                    Toast.MakeText(this,
+                        "Por favor, asegurese de seleccionar un responsable y volver a intentarlo",
+                        ToastLength.Long).Show();
                     return;
                 }
                 if (txtContrasena.Text.Length == 0)
                 {
-                    Toast.MakeText(this, "Por favor, asegurese de ingresar una contraseña y volver intentarlo", ToastLength.Long).Show();
+                    Toast.MakeText(this,
+                        "Por favor, asegurese de ingresar una contraseña y volver intentarlo",
+                        ToastLength.Long).Show();
                     return;
                 }
 
@@ -154,13 +157,15 @@ namespace RFIDTrackBin
                     return;
                 }
 
-                if (responsable == "admin" && txtContrasena.Text == "1234" ||
+                if ((responsable == "admin" && txtContrasena.Text == "1234") ||
                     getTb_RFID_Login(responsable, txtContrasena.Text))
                 {
                     string ubicacion = "";
                     string idUnidadNegocio = "";
                     string BajaCajones = "";
-                    if (responsable != "admin" && Tb_RFID_Usuarios != null)
+
+                    if (responsable != "admin" && Tb_RFID_Usuarios != null &&
+                        Tb_RFID_Usuarios.Rows.Count > 0)
                     {
                         ubicacion = Tb_RFID_Usuarios.Rows[0]["Ubicacion"].ToString();
                         idUnidadNegocio = Tb_RFID_Usuarios.Rows[0]["idUnidadNegocio"].ToString();
@@ -181,7 +186,7 @@ namespace RFIDTrackBin
             };
         }
 
-        // FIX L-2: Toda la inicialización de red/BD movida a método async.
+        // FIX L-2: Método async centraliza toda la inicialización de red/BD.
         private async Task InicializarAsync()
         {
             await Task.Run(() => validaWiFi());
@@ -191,19 +196,28 @@ namespace RFIDTrackBin
             await validateAppUpdateAsync();
         }
 
-        // FIX L-2 / L-3: Carga de spinner en background. Conexión local con using.
+        // FIX L-2 + FIX L-3: Carga de usuarios en Task.Run con conexión local en using.
+        // La versión anterior hacía da.Fill() en UI thread con thisConnection sin using,
+        // causando bloqueo ANR y leak de conexión si Fill() lanzaba excepción.
         private async Task CargarUsuariosAsync()
         {
             try
             {
                 var (tabla, items) = await Task.Run(() =>
                 {
-                    const string sql = "SELECT usuario, password FROM Tb_RFID_Usuarios " +
-                                       "WHERE idestatus = 1 AND RFIDTrackBin = 1 ORDER BY usuario";
+                    const string sql =
+                        "SELECT usuario, password FROM Tb_RFID_Usuarios " +
+                        "WHERE idestatus = 1 AND RFIDTrackBin = 1 ORDER BY usuario";
+
                     var dt = new DataTable("responsables");
+
+                    // FIX L-3: Conexión y adaptador locales con using garantizan
+                    // que los recursos se cierren aunque Fill() lance excepción.
                     using (var conn = new SqlConnection(cadenaConexionLogin))
                     using (var da = new SqlDataAdapter(sql, conn))
+                    {
                         da.Fill(dt);
+                    }
 
                     var arr = new string[dt.Rows.Count + 1];
                     arr[0] = "Seleccione un Responsable";
@@ -219,8 +233,10 @@ namespace RFIDTrackBin
                 RunOnUiThread(() =>
                 {
                     Spinner spinner2 = FindViewById<Spinner>(Resource.Id.sprUsuarios);
-                    comboAdapter = new ArrayAdapter<string>(this,
-                        Android.Resource.Layout.SimpleSpinnerItem, strFrutas);
+                    comboAdapter = new ArrayAdapter<string>(
+                        this,
+                        Android.Resource.Layout.SimpleSpinnerItem,
+                        strFrutas);
                     spinner2.Adapter = comboAdapter;
                     spinner2.ItemSelected -= sprUsuarios_ItemSelected2;
                     spinner2.ItemSelected += sprUsuarios_ItemSelected2;
@@ -234,20 +250,24 @@ namespace RFIDTrackBin
             }
         }
 
-        #region METODOS PARA VALIDACIONES (ACTUALIZAR VERSION)
+        #region METODOS VALIDACIONES / ACTUALIZAR VERSION
         private bool validaWiFi()
         {
-            WifiManager wifi = (WifiManager)Android.App.Application.Context.GetSystemService(Android.Content.Context.WifiService);
+            WifiManager wifi = (WifiManager)Android.App.Application.Context
+                .GetSystemService(Android.Content.Context.WifiService);
+
             if (wifi.IsWifiEnabled == false)
             {
-                RFIDTrackBin.GuardaLocal GuardaError = new RFIDTrackBin.GuardaLocal();
-                GuardaError.creartxt("Wifi Deshabilitada");
+                GuardaLocal guardaError = new GuardaLocal();
+                guardaError.creartxt("Wifi Deshabilitada");
+
                 RunOnUiThread(() =>
                 {
                     Android.App.AlertDialog.Builder alertDialog = new Android.App.AlertDialog.Builder(this);
-                    alertDialog.SetTitle(Html.FromHtml("<font color='#FCEC70' size = 10>Error en el Adaptador WIFI</font>"));
+                    alertDialog.SetTitle(Html.FromHtml("<font color='#FCEC70' size=10>Error en el Adaptador WIFI</font>"));
                     alertDialog.SetIcon(Resource.Drawable.warning);
-                    alertDialog.SetMessage(Html.FromHtml("<font color='#E0F1FA' size = 10>El Dispositivo no tiene la Wifi Activada, favor de activarlo</font>"));
+                    alertDialog.SetMessage(Html.FromHtml(
+                        "<font color='#E0F1FA' size=10>El Dispositivo no tiene la Wifi Activada, favor de activarlo</font>"));
                     alertDialog.SetCancelable(false);
                     alertDialog.SetNeutralButton("Ok", delegate { alertDialog.Dispose(); Finish(); });
                     alertDialog.Show();
@@ -259,23 +279,31 @@ namespace RFIDTrackBin
 
         private bool validaConexionRed()
         {
-            ConnectivityManager connectivityManager = (ConnectivityManager)GetSystemService(Android.Content.Context.ConnectivityService);
+            ConnectivityManager connectivityManager =
+                (ConnectivityManager)GetSystemService(Android.Content.Context.ConnectivityService);
             NetworkInfo activeConnection = connectivityManager.ActiveNetworkInfo;
             bool isOnline = (activeConnection != null) && activeConnection.IsConnected;
+
             if (!isOnline || !validaservidores())
             {
-                cadenaConexionLogin = "Persist Security Info=False;user id=sa; password=Gabira1;Initial Catalog =GAB_Irapuato; server=tcp:189.206.160.206,2352; Connect Timeout = 0";
+                cadenaConexionLogin =
+                    "Persist Security Info=False;user id=sa; password=Gabira1;" +
+                    "Initial Catalog =GAB_Irapuato; server=tcp:189.206.160.206,2352; Connect Timeout = 0";
                 INFO_FILE = "http://189.206.160.206:81/EmbarquesApk/RFIDTrackBin/version.txt";
+
                 if (!isOnline)
                 {
-                    RFIDTrackBin.GuardaLocal GuardaError = new RFIDTrackBin.GuardaLocal();
-                    GuardaError.creartxt("Error en la conexion de red, No esta conectado a ninguna red");
+                    GuardaLocal guardaError = new GuardaLocal();
+                    guardaError.creartxt("Error en la conexion de red, No esta conectado a ninguna red");
+
                     RunOnUiThread(() =>
                     {
                         Android.App.AlertDialog.Builder alertDialog = new Android.App.AlertDialog.Builder(this);
-                        alertDialog.SetTitle(Html.FromHtml("<font color='#FCEC70' size = 10>Error en la Conexion a Internet</font>"));
+                        alertDialog.SetTitle(Html.FromHtml(
+                            "<font color='#FCEC70' size=10>Error en la Conexion a Internet</font>"));
                         alertDialog.SetIcon(Resource.Drawable.warning);
-                        alertDialog.SetMessage(Html.FromHtml("<font color='#E0F1FA' size = 10>El Dispositivo no Esta conectado a ninguna Red, favor de verificarlo</font>"));
+                        alertDialog.SetMessage(Html.FromHtml(
+                            "<font color='#E0F1FA' size=10>El Dispositivo no Esta conectado a ninguna Red, favor de verificarlo</font>"));
                         alertDialog.SetCancelable(false);
                         alertDialog.SetNeutralButton("Ok", delegate { alertDialog.Dispose(); Finish(); });
                         alertDialog.Show();
@@ -295,18 +323,16 @@ namespace RFIDTrackBin
 
             for (int i = 0; i < sitios.Length; i++)
             {
-                RFIDTrackBin.GuardaLocal ValidarServidor = new RFIDTrackBin.GuardaLocal();
-                bool onlinex = ValidarServidor.HayConexion(sitios[i]);
+                GuardaLocal validarServidor = new GuardaLocal();
+                bool onlinex = validarServidor.HayConexion(sitios[i]);
                 if (onlinex == false)
-                    ValidarServidor.creartxt("Error al Conectar a " + sitios[i]);
+                    validarServidor.creartxt("Error al Conectar a " + sitios[i]);
             }
             return online;
         }
 
         private string getDeviceID()
         {
-            Android.Telephony.TelephonyManager telephonyManager;
-            telephonyManager = (Android.Telephony.TelephonyManager)GetSystemService(TelephonyService);
             string deviceid = CrossDeviceInfo.Current.Id;
             return deviceid;
         }
@@ -315,25 +341,27 @@ namespace RFIDTrackBin
         {
             try
             {
-                getData();
+                await Task.Run(() => getData());
             }
             catch { }
 
             RunOnUiThread(() =>
             {
                 versionApp.Text = "RFID Track Bin - Versión: " + currentVersionName;
+
                 if (isNewVersionAvailable())
                 {
-                    string msj = "Nueva Version: " + isNewVersionAvailable();
+                    string msj = "Nueva Version: " + latestVersionName + "(" + latestVersionCode + ")";
                     msj += "\nActual Version: " + currentVersionName + "(" + currentVersionCode + ")";
-                    msj += "\nUltima Version: " + latestVersionName + "(" + latestVersionCode + ")";
                     msj += "\nDesea Actualizar?";
 
                     Android.App.AlertDialog.Builder alertDialog = new Android.App.AlertDialog.Builder(this);
-                    alertDialog.SetTitle(Html.FromHtml("<font color='#DF0101' size = 10>Actualizacion Disponible"));
+                    alertDialog.SetTitle(Html.FromHtml("<font color='#DF0101' size=10>Actualizacion Disponible"));
                     alertDialog.SetIcon(Resource.Drawable.update);
-                    alertDialog.SetMessage(Html.FromHtml("<font color='#000000' size = 10>" + msj + "</font>"));
-                    alertDialog.SetPositiveButton(Html.FromHtml("<font face = 'Comic Sans MS, arial' color='#DF0101' size = '10'>OK</font>"), SaveAction);
+                    alertDialog.SetMessage(Html.FromHtml("<font color='#000000' size=10>" + msj + "</font>"));
+                    alertDialog.SetPositiveButton(
+                        Html.FromHtml("<font face='Comic Sans MS, arial' color='#DF0101' size='10'>OK</font>"),
+                        SaveAction);
                     alertDialog.SetCancelable(false);
                     alertDialog.Create();
                     alertDialog.Show();
@@ -346,8 +374,8 @@ namespace RFIDTrackBin
             try
             {
                 context = this;
-                System.Console.WriteLine("AutoUpdater", "GetData");
-                Android.Content.PM.PackageInfo pckginfo = context.PackageManager.GetPackageInfo(context.PackageName, 0);
+                Android.Content.PM.PackageInfo pckginfo =
+                    context.PackageManager.GetPackageInfo(context.PackageName, 0);
                 currentVersionCode = pckginfo.VersionCode;
                 currentVersionName = pckginfo.VersionName;
 
@@ -359,11 +387,10 @@ namespace RFIDTrackBin
                 latestVersionCode = json.GetInt("versionCode");
                 latestVersionName = json.OptString("versionName");
                 downloadURL = json.GetString("downloadURL");
-                System.Console.WriteLine("AutoUpdate", "Datos obtenidos con éxito");
             }
-            catch (JSONException e) { System.Console.WriteLine("AutoUpdate", "Ha habido un error con el JSON", e); }
-            catch (Android.Content.PM.PackageManager.NameNotFoundException e) { System.Console.WriteLine("AutoUpdate", "Ha habido un error con el packete :S", e); }
-            catch (System.IO.IOException e) { System.Console.WriteLine("AutoUpdate", "Ha habido un error con la descarga", e); }
+            catch (JSONException e) { System.Console.WriteLine("AutoUpdate", "Error JSON", e); }
+            catch (Android.Content.PM.PackageManager.NameNotFoundException e) { System.Console.WriteLine("AutoUpdate", "Error paquete", e); }
+            catch (System.IO.IOException e) { System.Console.WriteLine("AutoUpdate", "Error descarga", e); }
         }
 
         public bool isNewVersionAvailable() => latestVersionCode > currentVersionCode;
@@ -371,54 +398,18 @@ namespace RFIDTrackBin
         private void SaveAction(object sender, DialogClickEventArgs e) => downloadApp();
         private void CancelaAction(object sender, DialogClickEventArgs e) => Finish();
 
-        private string DownloadApp()
+        private string downloadApp()
         {
-            var progressDialog = ProgressDialog.Show(this, "Espere Por Favor...", "Descargando Actualizacion", true);
+            var progressDialog = ProgressDialog.Show(
+                this, "Espere Por Favor...", "Descargando Actualización", true);
+
             new System.Threading.Thread(new System.Threading.ThreadStart(delegate
             {
                 try
                 {
-                    var pathToNewFolder = Android.OS.Environment.ExternalStorageDirectory.AbsolutePath + "/RFIDTrackBin";
-                    System.IO.Directory.CreateDirectory(pathToNewFolder);
-
-                    string archivo = Android.OS.Environment.ExternalStorageDirectory.AbsolutePath + "/RFIDTrackBin/com.mrlucky.rfidtrackbin.apk";
-
-                    var webClient = new WebClient();
-                    webClient.DownloadFileCompleted += (s, ex) =>
-                    {
-                        Java.IO.File toInstall = new Java.IO.File(archivo);
-                        Android.Net.Uri downloadUri = AndroidX.Core.Content.FileProvider.GetUriForFile(context, context.ApplicationContext.PackageName + ".provider", toInstall);
-
-                        Intent intent = new Intent(Intent.ActionView);
-                        intent.SetDataAndType(downloadUri, "application/vnd.android.package-archive");
-                        intent.SetFlags(ActivityFlags.NewTask);
-                        intent.AddFlags(ActivityFlags.GrantReadUriPermission);
-                        StartActivity(intent);
-                        Finish();
-                    };
-
-                    var folder = Android.OS.Environment.ExternalStorageDirectory.AbsolutePath + "/PreSplitCamionetas";
-                    webClient.DownloadFileAsync(new System.Uri("http://189.206.160.206:81/EmbarquesApk/RFIDTrackBin/com.mrlucky.rfidtrackbin.apk"), folder + "/com.mrlucky.rfidtrackbin.apk");
-                }
-                catch (System.IO.IOException e)
-                {
-                    RunOnUiThread(() => progressDialog.Hide());
-                    RunOnUiThread(() => Toast.MakeText(this, e.ToString(), ToastLength.Long).Show());
-                }
-            })).Start();
-            return "1";
-        }
-
-        private string downloadApp()
-        {
-            var progressDialog = ProgressDialog.Show(this, "Espere Por Favor...", "Descargando Actualización", true);
-
-            new System.Threading.Thread(new ThreadStart(delegate
-            {
-                try
-                {
                     var pathToNewFolder = System.IO.Path.Combine(
-                        Android.App.Application.Context.GetExternalFilesDir(null).AbsolutePath, "RFIDTrackBin");
+                        Android.App.Application.Context.GetExternalFilesDir(null).AbsolutePath,
+                        "RFIDTrackBin");
                     System.IO.Directory.CreateDirectory(pathToNewFolder);
 
                     string archivo = System.IO.Path.Combine(pathToNewFolder, "apk");
@@ -430,13 +421,17 @@ namespace RFIDTrackBin
 
                         if (ex.Error != null)
                         {
-                            RunOnUiThread(() => Toast.MakeText(this, "Error en la descarga: " + ex.Error.Message, ToastLength.Long).Show());
+                            RunOnUiThread(() =>
+                                Toast.MakeText(this, "Error en la descarga: " + ex.Error.Message,
+                                    ToastLength.Long).Show());
                             return;
                         }
 
                         Java.IO.File toInstall = new Java.IO.File(archivo);
                         Android.Net.Uri downloadUri = AndroidX.Core.Content.FileProvider.GetUriForFile(
-                            this, this.ApplicationContext.PackageName + ".fileprovider", toInstall);
+                            this,
+                            this.ApplicationContext.PackageName + ".fileprovider",
+                            toInstall);
 
                         Intent intentx = new Intent(Intent.ActionView);
                         intentx.SetDataAndType(downloadUri, "application/vnd.android.package-archive");
@@ -445,10 +440,14 @@ namespace RFIDTrackBin
                         StartActivity(intentx);
                     };
 
-                    if (INFO_FILE == "http://192.168.123.4:81/EmbarquesApk/RFIDTrackBin/version.txt")
-                        webClient.DownloadFileAsync(new System.Uri("http://192.168.123.4:81/EmbarquesApk/RFIDTrackBin/com.mrlucky.rfidtrackbin.apk"), archivo);
+                    if (INFO_FILE.Contains("192.168.123.4"))
+                        webClient.DownloadFileAsync(new System.Uri(
+                            "http://192.168.123.4:81/EmbarquesApk/RFIDTrackBin/com.mrlucky.rfidtrackbin.apk"),
+                            archivo);
                     else
-                        webClient.DownloadFileAsync(new System.Uri("http://189.206.160.206:81/EmbarquesApk/RFIDTrackBin/com.mrlucky.rfidtrackbin.apk"), archivo);
+                        webClient.DownloadFileAsync(new System.Uri(
+                            "http://189.206.160.206:81/EmbarquesApk/RFIDTrackBin/com.mrlucky.rfidtrackbin.apk"),
+                            archivo);
                 }
                 catch (System.IO.IOException e)
                 {
@@ -464,20 +463,79 @@ namespace RFIDTrackBin
         {
             StrictMode.ThreadPolicy policy = new StrictMode.ThreadPolicy.Builder().PermitAll().Build();
             StrictMode.SetThreadPolicy(policy);
+
             HttpURLConnection c = (HttpURLConnection)url.OpenConnection();
             c.RequestMethod = "GET";
             c.ReadTimeout = (15 * 1000);
             c.UseCaches = false;
             c.Connect();
-            Java.IO.BufferedReader reader = new Java.IO.BufferedReader(new Java.IO.InputStreamReader(c.InputStream));
-            Java.Lang.StringBuilder stringBuilder = new Java.Lang.StringBuilder();
+
+            Java.IO.BufferedReader reader = new Java.IO.BufferedReader(
+                new Java.IO.InputStreamReader(c.InputStream));
+            Java.Lang.StringBuilder sb = new Java.Lang.StringBuilder();
             string line;
             while ((line = reader.ReadLine()) != null)
-                stringBuilder.Append(line + "\n");
-            return stringBuilder.ToString();
+                sb.Append(line + "\n");
+            return sb.ToString();
         }
         #endregion
 
+        #region CATALOGOS LOGIN
+        public bool getTb_RFID_Login(string usuario, string password)
+        {
+            bool result = false;
+            try
+            {
+                // FIX L-1: Reemplazada concatenación directa de strings por SqlParameter.
+                // La versión anterior construía la query con string concatenation, permitiendo
+                // SQL Injection con contraseñas como ' OR '1'='1.
+                const string query = @"
+                    SELECT * FROM Tb_RFID_Usuarios
+                    WHERE idEstatus     = 1
+                      AND usuario       = @usuario
+                      AND password      = @password
+                      AND RFIDTrackBin  = 1";
+
+                using (var conn = new SqlConnection(cadenaConexionLogin))
+                using (var da = new SqlDataAdapter(query, conn))
+                {
+                    da.SelectCommand.Parameters.AddWithValue("@usuario", usuario);
+                    da.SelectCommand.Parameters.AddWithValue("@password", password);
+
+                    dsLogin.Clear();
+                    da.Fill(dsLogin, "Tb_RFID_Usuarios");
+
+                    if (dsLogin.Tables.Contains("Tb_RFID_Usuarios") &&
+                        dsLogin.Tables["Tb_RFID_Usuarios"].Rows.Count > 0)
+                    {
+                        Tb_RFID_Usuarios = dsLogin.Tables["Tb_RFID_Usuarios"];
+                        result = true;
+                    }
+                    else
+                    {
+                        Tb_RFID_Usuarios = null;
+                        result = false;
+                    }
+                }
+
+                return result;
+            }
+            catch (SqlException) { return result; }
+            catch (Exception) { return result; }
+        }
+        #endregion
+
+        private void sprUsuarios_ItemSelected2(object sender, AdapterView.ItemSelectedEventArgs e)
+        {
+            Spinner spinner = (Spinner)sender;
+            responsablesplit = spinner.GetItemAtPosition(e.Position).ToString();
+            txtContrasena.RequestFocus();
+            InputMethodManager immx =
+                (InputMethodManager)GetSystemService(Android.Content.Context.InputMethodService);
+            immx.ShowSoftInput(txtContrasena, ShowFlags.Implicit);
+        }
+
+        #region PERMISOS / BLUETOOTH / NFC LIFECYCLE
         private void CheckAndRequestPermissions()
         {
             string[] requiredPermissions =
@@ -503,7 +561,9 @@ namespace RFIDTrackBin
                 CheckBluetooth();
         }
 
-        public override void OnRequestPermissionsResult(int requestCode, string[] permissions,
+        public override void OnRequestPermissionsResult(
+            int requestCode,
+            string[] permissions,
             [GeneratedEnum] Android.Content.PM.Permission[] grantResults)
         {
             base.OnRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -511,7 +571,9 @@ namespace RFIDTrackBin
 
             if (requestCode == REQUEST_PERMISSION_CODE)
             {
-                bool allGranted = Array.TrueForAll(grantResults, result => result == Android.Content.PM.Permission.Granted);
+                bool allGranted = Array.TrueForAll(
+                    grantResults,
+                    result => result == Android.Content.PM.Permission.Granted);
                 if (allGranted) CheckBluetooth();
                 else Finish();
             }
@@ -528,7 +590,8 @@ namespace RFIDTrackBin
         {
             base.OnResume();
             if (nfcAdapter != null)
-                nfcAdapter.EnableForegroundDispatch(this, pendingIntent, intentFiltersArray, techListsArray);
+                nfcAdapter.EnableForegroundDispatch(
+                    this, pendingIntent, intentFiltersArray, techListsArray);
         }
 
         protected override void OnPause()
@@ -544,7 +607,7 @@ namespace RFIDTrackBin
 
             if (intent.Action == NfcAdapter.ActionTechDiscovered)
             {
-                var tag = (Tag)intent.GetParcelableExtra(NfcAdapter.ExtraTag);
+                var tag = (Android.Nfc.Tag)intent.GetParcelableExtra(NfcAdapter.ExtraTag);
                 byte[] id = tag.GetId();
                 string uid = BitConverter.ToString(id).Replace("-", "").ToUpperInvariant();
                 ValidarLoginPorNFC(uid);
@@ -570,7 +633,14 @@ namespace RFIDTrackBin
 
         private void ValidarLoginPorNFC(string uid)
         {
-            List<string> uidsPermitidos = new List<string> { "04AABBCCDD", "12345678ABCDEF", "04774211B506D0" };
+            // FIX L-5 (parcial): UIDs hardcodeados para compatibilidad.
+            // Recomendación: cargar desde BD con query parametrizado.
+            List<string> uidsPermitidos = new List<string>
+            {
+                "04AABBCCDD",
+                "12345678ABCDEF",
+                "04774211B506D0"
+            };
 
             if (uidsPermitidos.Contains(uid))
             {
@@ -586,65 +656,6 @@ namespace RFIDTrackBin
                 Toast.MakeText(this, $"Tarjeta no autorizada: {uid}", ToastLength.Short).Show();
             }
         }
-
-        #region CATALOGOS LOGIN
-        public bool getTb_RFID_Login(string usuario, string password)
-        {
-            bool result = false;
-            try
-            {
-                using (SqlConnection thisConnection = new SqlConnection(cadenaConexionLogin))
-                {
-                    // FIX L-1: Reemplazada concatenación directa de strings por parámetros SqlParameter.
-                    // La versión anterior era vulnerable a SQL Injection.
-                    const string query = @"
-                        SELECT * FROM Tb_RFID_Usuarios
-                        WHERE idEstatus     = 1
-                          AND usuario       = @usuario
-                          AND password      = @password
-                          AND RFIDTrackBin  = 1";
-
-                    using (SqlDataAdapter da = new SqlDataAdapter(query, thisConnection))
-                    {
-                        da.SelectCommand.Parameters.AddWithValue("@usuario", usuario);
-                        da.SelectCommand.Parameters.AddWithValue("@password", password);
-
-                        dsLogin.Clear();
-                        da.Fill(dsLogin, "Tb_RFID_Usuarios");
-
-                        if (dsLogin.Tables.Contains("Tb_RFID_Usuarios") &&
-                            dsLogin.Tables["Tb_RFID_Usuarios"].Rows.Count > 0)
-                        {
-                            Tb_RFID_Usuarios = dsLogin.Tables["Tb_RFID_Usuarios"];
-                            result = true;
-                        }
-                        else
-                        {
-                            Tb_RFID_Usuarios = null;
-                            result = false;
-                        }
-                    }
-                }
-                return result;
-            }
-            catch (SqlException)
-            {
-                return result;
-            }
-            catch (Exception)
-            {
-                return result;
-            }
-        }
         #endregion
-
-        private void sprUsuarios_ItemSelected2(object sender, AdapterView.ItemSelectedEventArgs e)
-        {
-            Spinner spinner = (Spinner)sender;
-            responsablesplit = spinner.GetItemAtPosition(e.Position).ToString();
-            txtContrasena.RequestFocus();
-            InputMethodManager immx = (InputMethodManager)GetSystemService(Android.Content.Context.InputMethodService);
-            immx.ShowSoftInput(txtContrasena, ShowFlags.Implicit);
-        }
     }
 }

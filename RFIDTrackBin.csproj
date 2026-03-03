@@ -96,7 +96,6 @@
     <Compile Include="fragment\InventarioFragment.cs" />
     <Compile Include="fragment\SalidasFragment.cs" />
     <Compile Include="fragment\EntradasFragment.cs" />
-    <Compile Include="fragment\HomeFragment.cs" />
     <Compile Include="fragment\VerificacionFragment.cs" />
     <Compile Include="GuardaLocal.cs" />
     <Compile Include="Helpers\BluetoothHelper.cs" />

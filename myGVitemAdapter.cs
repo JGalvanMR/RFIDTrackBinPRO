@@ -55,8 +55,9 @@ namespace RFIDTrackBin
                 // FIX A-1: Loguear error en lugar de silenciarlo.
                 AppLogger.LogError(e);
 
-                // Garantizar que GetView nunca devuelva null — causa NullReferenceException
-                // en el sistema de GridView si convertView fue null antes del inflate.
+                // FIX A-1: Garantizar que GetView NUNCA devuelva null.
+                // Devolver null desde GetView causa NullReferenceException en el sistema
+                // de GridView/ListView de Android. Si el inflate falló usamos layout fallback.
                 if (convertView == null)
                 {
                     convertView = _CurrentContext.LayoutInflater

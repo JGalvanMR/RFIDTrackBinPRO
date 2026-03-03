@@ -26,7 +26,8 @@ namespace RFIDTrackBin
 
                     if (!string.IsNullOrEmpty(qrText))
                     {
-                        // FIX SR-1: Loguear cuando Instance es null para no perder scans silenciosamente
+                        // FIX SR-1: Loguear cuando Instance es null para no perder
+                        // scans silenciosamente durante recreación de MainActivity.
                         if (MainActivity.Instance != null)
                         {
                             MainActivity.Instance.ProcessQR(qrText);
