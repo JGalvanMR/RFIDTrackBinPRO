@@ -51,12 +51,9 @@ namespace RFIDTrackBin.fragment
         private DateTime _lastInventoryStart = DateTime.MinValue;
         private DateTime _lastInventoryStop = DateTime.MinValue;
         private const int INVENTORY_DEBOUNCE_MS = 500;
-        private const int MIN_RUN_TIME_MS = 800; // Aumentado para evitar paradas prematuras
         private DateTime _lastTriggerTime = DateTime.MinValue;
-
-        // Timer para retrasar la parada
-        private Timer _stopTimer;
-        private readonly object _timerLock = new object();
+        private Handler _stopHandler;
+        private bool _stopPending = false;
 
         // Para optimizar actualizaciones del GridView
         private readonly List<TagLeido> _pendingTags = new List<TagLeido>();
@@ -99,6 +96,7 @@ namespace RFIDTrackBin.fragment
         {
             base.OnCreate(savedInstanceState);
             _catalogoLoadTask = Task.Run(() => _activity?.getTb_RFID_Catalogo());
+            _stopHandler = new Handler(Looper.MainLooper);
         }
 
         public override async void OnViewCreated(View view, Bundle savedInstanceState)
@@ -199,7 +197,6 @@ namespace RFIDTrackBin.fragment
                 {
                     _activity.baseReader.AddListener(this);
                     _activity.baseReader.RfidUhf.AddListener(this);
-                    // Configurar lector UNA SOLA VEZ aquí, no en cada inicio de inventario
                     InitSetting();
                     UpdateText(IDType.ConnectState, "Connected");
                 }
@@ -217,8 +214,8 @@ namespace RFIDTrackBin.fragment
         public override void OnPause()
         {
             Log.Debug(TAG, "OnPause - Deteniendo inventario");
-            CancelarDetencionProgramada();
-            DetenerInventarioAhora(); // Forzar parada inmediata
+            DetenerInventarioInmediato();
+            _stopHandler.RemoveCallbacksAndMessages(null);
             base.OnPause();
             Log.Debug(TAG, "OnPause completado");
         }
@@ -226,8 +223,8 @@ namespace RFIDTrackBin.fragment
         public override void OnDestroy()
         {
             _isDisposed = true;
-            CancelarDetencionProgramada();
-            DetenerInventarioAhora();
+            _stopHandler.RemoveCallbacksAndMessages(null);
+            DetenerInventarioInmediato();
 
             try
             {
@@ -314,7 +311,10 @@ namespace RFIDTrackBin.fragment
 
             if (state == KeyState.KeyDown)
             {
-                CancelarDetencionProgramada();
+                // Cancelar cualquier parada pendiente
+                _stopHandler.RemoveCallbacksAndMessages(null);
+                _stopPending = false;
+
                 if (_activity.baseReader.Action == ActionState.Stop)
                 {
                     IniciarInventario();
@@ -324,7 +324,19 @@ namespace RFIDTrackBin.fragment
             {
                 if (_activity.baseReader.Action == ActionState.Inventory6c)
                 {
-                    ProgramarDetencion(400); // 400 ms de gracia
+                    // Programar parada con un pequeño retraso para evitar rebotes
+                    if (!_stopPending)
+                    {
+                        _stopPending = true;
+                        _stopHandler.PostDelayed(() =>
+                        {
+                            if (_stopPending)
+                            {
+                                DetenerInventario();
+                                _stopPending = false;
+                            }
+                        }, 300);
+                    }
                 }
             }
         }
@@ -342,9 +354,9 @@ namespace RFIDTrackBin.fragment
 
             try
             {
-                // No llamar a InitSetting aquí, ya se configuró en OnResume
                 _activity.baseReader.RfidUhf.Inventory6c();
                 _activity.baseReader.SetDisplayTags(new DisplayTags(ReadOnceState.Off, BeepAndVibrateState.On));
+                Log.Debug(TAG, "Inventario iniciado");
             }
             catch (Exception ex)
             {
@@ -353,41 +365,35 @@ namespace RFIDTrackBin.fragment
             }
         }
 
-        private void ProgramarDetencion(int delayMs)
+        private void DetenerInventario()
         {
-            lock (_timerLock)
+            lock (_inventoryLock)
             {
-                _stopTimer?.Dispose();
-                _stopTimer = new Timer(_ =>
+                if (!_isInventoryRunning) return;
+                if ((DateTime.Now - _lastInventoryStart).TotalMilliseconds < 200) // Mínimo 200ms
+                    return;
+                _isInventoryRunning = false;
+                _lastInventoryStop = DateTime.Now;
+            }
+
+            try
+            {
+                if (_activity?.baseReader?.RfidUhf != null && _activity.baseReader.Action == ActionState.Inventory6c)
                 {
-                    // Verificar si aún debe detenerse
-                    lock (_inventoryLock)
-                    {
-                        if (!_isInventoryRunning) return;
-                        if ((DateTime.Now - _lastInventoryStart).TotalMilliseconds < MIN_RUN_TIME_MS)
-                        {
-                            // Ha pasado muy poco tiempo, reprogramar
-                            ProgramarDetencion(200);
-                            return;
-                        }
-                    }
-                    // Ejecutar en UI thread
-                    _activity?.RunOnUiThread(() => DetenerInventarioAhora());
-                }, null, delayMs, Timeout.Infinite);
+                    _activity.baseReader.RfidUhf.Stop();
+                    Log.Debug(TAG, "Inventario detenido");
+                }
             }
-        }
-
-        private void CancelarDetencionProgramada()
-        {
-            lock (_timerLock)
+            catch (Exception ex)
             {
-                _stopTimer?.Dispose();
-                _stopTimer = null;
+                Log.Error(TAG, $"Error al detener inventario: {ex.Message}");
             }
         }
 
-        private void DetenerInventarioAhora()
+        private void DetenerInventarioInmediato()
         {
+            _stopHandler.RemoveCallbacksAndMessages(null);
+            _stopPending = false;
             lock (_inventoryLock)
             {
                 if (!_isInventoryRunning) return;
@@ -401,10 +407,7 @@ namespace RFIDTrackBin.fragment
                     _activity.baseReader.RfidUhf.Stop();
                 }
             }
-            catch (Exception ex)
-            {
-                Log.Error(TAG, $"Error al detener inventario: {ex.Message}");
-            }
+            catch { }
         }
 
         public void OnReaderStateChanged(BaseReader reader, ConnectState state, Java.Lang.Object @params)
@@ -471,27 +474,73 @@ namespace RFIDTrackBin.fragment
             UpdateText(IDType.TagRSSI, rssi.ToString());
         }
 
+        //private void ScheduleGridUpdate()
+        //{
+        //    if (_updateScheduled) return;
+        //    _updateScheduled = true;
+        //    _uiHandler.PostDelayed(() =>
+        //    {
+        //        _updateScheduled = false;
+        //        List<TagLeido> tagsToAdd;
+        //        lock (_pendingTags)
+        //        {
+        //            if (_pendingTags.Count == 0) return;
+        //            tagsToAdd = new List<TagLeido>(_pendingTags);
+        //            _pendingTags.Clear();
+        //        }
+        //        _activity.RunOnUiThread(() =>
+        //        {
+        //            if (_isDisposed || tagEPCList == null || adapter == null) return;
+        //            tagEPCList.AddRange(tagsToAdd);
+        //            adapter.NotifyDataSetChanged();
+        //        });
+        //    }, 200);
+        //}
+        private readonly HashSet<string> _epcSet = new HashSet<string>();
+
         private void ScheduleGridUpdate()
         {
-            if (_updateScheduled) return;
+            if (_updateScheduled)
+                return;
+
             _updateScheduled = true;
+
             _uiHandler.PostDelayed(() =>
             {
                 _updateScheduled = false;
+
                 List<TagLeido> tagsToAdd;
+
                 lock (_pendingTags)
                 {
-                    if (_pendingTags.Count == 0) return;
+                    if (_pendingTags.Count == 0)
+                        return;
+
                     tagsToAdd = new List<TagLeido>(_pendingTags);
                     _pendingTags.Clear();
                 }
-                _activity.RunOnUiThread(() =>
+
+                if (_isDisposed || tagEPCList == null || adapter == null)
+                    return;
+
+                int added = 0;
+
+                foreach (var tag in tagsToAdd)
                 {
-                    if (_isDisposed || tagEPCList == null || adapter == null) return;
-                    tagEPCList.AddRange(tagsToAdd);
+                    // evita duplicados
+                    if (_epcSet.Add(tag.EPC))
+                    {
+                        tagEPCList.Add(tag);
+                        added++;
+                    }
+                }
+
+                if (added > 0)
+                {
                     adapter.NotifyDataSetChanged();
-                });
-            }, 200);
+                }
+
+            }, 200); // batch update cada 200ms
         }
         #endregion
 

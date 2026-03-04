@@ -3,19 +3,24 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:minHeight="64dp"
     android:orientation="horizontal"
-    android:padding="10dp"
+    android:paddingStart="12dp"
+    android:paddingEnd="12dp"
+    android:paddingTop="10dp"
+    android:paddingBottom="10dp"
     android:background="@drawable/bgdefault2"
     android:gravity="center_vertical"
-    android:elevation="3dp">
+    android:elevation="2dp">
 
 	<ImageView
         android:id="@+id/imgPers"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
         android:src="@drawable/camion_de_carga"
         android:scaleType="centerInside"
-        android:layout_marginEnd="10dp"/>
+        android:layout_marginEnd="12dp"
+        android:contentDescription="icon_flete"/>
 
 	<LinearLayout
         android:layout_width="0dp"
@@ -28,9 +33,11 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Flete"
-            android:textColor="#111111"
+            android:textColor="#212121"
             android:textSize="16sp"
             android:textStyle="bold"
+            android:ellipsize="end"
+            android:maxLines="1"
             android:letterSpacing="0.02"/>
 
 		<TextView
@@ -38,9 +45,11 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Proveedor"
-            android:textColor="#666666"
+            android:textColor="#757575"
             android:textSize="13sp"
-            android:layout_marginTop="2dp"/>
+            android:layout_marginTop="3dp"
+            android:ellipsize="end"
+            android:maxLines="1"/>
 
 	</LinearLayout>
 

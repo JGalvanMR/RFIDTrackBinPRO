@@ -77,6 +77,11 @@ namespace RFIDTrackBin.fragment
         DataSet ds = new DataSet();
         public static DataTable areas = new DataTable("areas");
 
+        private readonly List<TagLeido> _pendingTags = new List<TagLeido>();
+        private readonly Handler _uiHandler = new Handler(Looper.MainLooper);
+        private bool _updateScheduled = false;
+        private HashSet<string> _epcLeidosSet = new HashSet<string>();
+
         int totalCajasLeidasINT = 0;
         int totalAcumuladoINT = 0;
 
@@ -849,7 +854,7 @@ namespace RFIDTrackBin.fragment
             accessTagResult = (code == ResultCode.NoError);
         }
 
-        public void OnRfidUhfReadTag(BaseUHF uhf, string tag, Java.Lang.Object @params)
+        public void OnRfidUhfReadTagOG(BaseUHF uhf, string tag, Java.Lang.Object @params)
         {
             if (_isDisposed || !IsAdded || _activity == null || tagsLeidos == null)
             {
@@ -889,6 +894,65 @@ namespace RFIDTrackBin.fragment
                     if (totalCajasLeidas != null)
                         totalCajasLeidas.Text = totalCajasLeidasINT.ToString();
                 }
+            });
+
+            UpdateText(IDType.TagRSSI, rssi.ToString());
+        }
+        public void OnRfidUhfReadTag(BaseUHF uhf, string tag, Java.Lang.Object @params)
+        {
+            if (_isDisposed || !IsAdded || _activity == null || tagsLeidos == null)
+            {
+                Log.Warn(TAG, "OnRfidUhfReadTag: Fragmento no disponible, ignorando tag");
+                return;
+            }
+
+            if (StringUtil.IsNullOrEmpty(tag)) return;
+
+            float rssi = 0;
+            string tid = "";
+
+            if (@params != null)
+            {
+                TagExtParam param = (TagExtParam)@params;
+                rssi = param.Rssi;
+                tid = param.TID;
+            }
+
+            if (!_isFindTag)
+            {
+                UpdateText(IDType.TagEPC, tag);
+                UpdateText(IDType.TagTID, tid);
+            }
+
+            _activity.RunOnUiThread(() =>
+            {
+                if (_isDisposed || tagsLeidos == null) return;
+
+                // evitar duplicados
+                if (!_epcLeidosSet.Add(tag)) return;
+
+                // validar contra catálogo
+                if (!validaEPC(tag))
+                {
+                    _epcLeidosSet.Remove(tag);
+                    return;
+                }
+
+                PlayBeepSound();
+
+                tagsLeidos.Add(new TagLeido
+                {
+                    EPC = tag,
+                    RSSI = rssi,
+                    FechaLectura = DateTime.Now
+                });
+
+                adapter?.NotifyDataSetChanged();
+
+                totalCajasLeidasINT++;
+
+                if (totalCajasLeidas != null)
+                    totalCajasLeidas.Text = totalCajasLeidasINT.ToString();
             });
 
             UpdateText(IDType.TagRSSI, rssi.ToString());
@@ -1239,6 +1303,7 @@ namespace RFIDTrackBin.fragment
                 tagsLeidos.Clear();
                 adapter.NotifyDataSetChanged();
                 totalCajasLeidasINT = 0;
+                _epcLeidosSet.Clear();
                 if (totalCajasLeidas != null)
                     totalCajasLeidas.Text = "0";
             });

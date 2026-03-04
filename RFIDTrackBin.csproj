@@ -328,6 +328,12 @@
     <AndroidResource Include="Resources\drawable\bgdefault2.xml">
       <SubType>Designer</SubType>
     </AndroidResource>
+    <AndroidResource Include="Resources\drawable\circle_background.xml">
+      <SubType>Designer</SubType>
+    </AndroidResource>
+    <AndroidResource Include="Resources\drawable\ic_chevron_right.xml">
+      <SubType>Designer</SubType>
+    </AndroidResource>
     <Content Include="Resources\layout\dialog_edit_text.xml" />
     <AndroidResource Include="Resources\layout\InventarioFragment.xml">
       <Generator>MSBuild:UpdateGeneratedFiles</Generator>
