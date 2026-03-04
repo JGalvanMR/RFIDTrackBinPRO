@@ -59,6 +59,7 @@ namespace RFIDTrackBin.fragment
         private readonly object _inventoryLock = new object();
         private bool _isInventoryInProgress = false;
         private DateTime _lastTriggerTime = DateTime.MinValue;
+        private bool _isLoadingFlete = false; // Fix C: bloquea handlers durante SetSelection programático
 
         #region Button
         private Button btnGuardar;
@@ -169,8 +170,91 @@ namespace RFIDTrackBin.fragment
             progressBar = view.FindViewById<ProgressBar>(Resource.Id.progressBarGuardar);
             loadingOverlay = view.FindViewById<RelativeLayout>(Resource.Id.loadingOverlay);
 
-            // ISSUE 2: Intentar restaurar sesión activa previa (si el usuario vino de Home)
-            await RestaurarSesionSalidaAsync();
+            // ISSUE 2: Si hay sesión pendiente mostrar diálogo; si no, flujo normal
+            if (HaySesionSalidaPendiente())
+                MostrarDialogoSalidaPendiente();
+        }
+
+        private bool HaySesionSalidaPendiente()
+        {
+            var prefs = _activity.GetSharedPreferences(PREFS_SALIDAS, FileCreationMode.Private);
+            return prefs.GetBoolean(PREF_S_ACTIVA, false);
+        }
+
+        private void MostrarDialogoSalidaPendiente()
+        {
+            var prefs = _activity.GetSharedPreferences(PREFS_SALIDAS, FileCreationMode.Private);
+            int idPendiente = prefs.GetInt(PREF_S_ID, 0);
+            string provPendiente = prefs.GetString(PREF_S_PROV, "");
+            string ranchoPendiente = prefs.GetString(PREF_S_RANCHO, "");
+            string tablaPendiente = prefs.GetString(PREF_S_TABLA, "");
+
+            // Resolver nombres legibles desde la BD
+            string nombreProv = ObtenerNombrePorClave("prov_nombre", "vwProveedor", "prov_clave", provPendiente) ?? provPendiente;
+            string nombreRancho = ObtenerNombrePorClave("rch_nombre", "vwRanchos", "rch_clave", ranchoPendiente) ?? ranchoPendiente;
+            string nombreTabla = ObtenerNombrePorClave("tbl_nombre", "vwTablas", "tbl_clave", tablaPendiente) ?? tablaPendiente;
+
+            string mensaje = $"Tiene una salida sin finalizar:\n\n" +
+                             $"ID: {idPendiente}\n" +
+                             $"Proveedor: {nombreProv}\n" +
+                             $"Rancho: {nombreRancho}\n" +
+                             $"Tabla: {nombreTabla}";
+
+            new AlertDialog.Builder(_activity)
+                .SetTitle("Salida Pendiente")
+                .SetMessage(mensaje)
+                .SetPositiveButton("Continuar", async (s, e) =>
+                {
+                    await RestaurarSesionSalidaAsync();
+                })
+                .SetNegativeButton("Cerrar Ahora", async (s, e) =>
+                {
+                    await CerrarSalidaHuerfanaAsync(idPendiente);
+                    LimpiarSesionSalida();
+                })
+                .SetCancelable(false)
+                .Show();
+        }
+
+        /// <summary>Obtiene un nombre legible desde una vista usando su clave.</summary>
+        private string ObtenerNombrePorClave(string campoNombre, string vista, string campoClave, string valorClave)
+        {
+            if (string.IsNullOrEmpty(valorClave)) return null;
+            try
+            {
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                conn.Open();
+                string sql = $"SELECT TOP 1 {campoNombre} FROM {vista} WHERE {campoClave} = @clave";
+                using SqlCommand cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@clave", valorClave);
+                return cmd.ExecuteScalar()?.ToString();
+            }
+            catch { return null; }
+        }
+
+        private async Task CerrarSalidaHuerfanaAsync(int idSalida)
+        {
+            try
+            {
+                await Task.Run(() =>
+                {
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    conn.Open();
+                    const string query = @"UPDATE Tb_RFID_Mstr 
+                                           SET Mstr_Status = 'C'
+                                           WHERE IdConse = @Id AND Mstr_Status = 'A'";
+                    using SqlCommand cmd = new SqlCommand(query, conn);
+                    cmd.Parameters.AddWithValue("@Id", idSalida);
+                    int filas = cmd.ExecuteNonQuery();
+                    Log.Debug(TAG, $"CerrarSalidaHuerfanaAsync: {filas} fila(s) actualizadas para ID={idSalida}");
+                });
+                Toast.MakeText(_activity, $"Salida #{idSalida} cerrada", ToastLength.Short).Show();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"CerrarSalidaHuerfanaAsync: {ex.Message}");
+                Toast.MakeText(_activity, "No se pudo cerrar la salida pendiente", ToastLength.Long).Show();
+            }
         }
 
         public void InitializeSoundPool()
@@ -211,18 +295,9 @@ namespace RFIDTrackBin.fragment
             switch (item.ItemId)
             {
                 case Resource.Id.inicio_salidas:
-                    _ = InsertarSalidaAsync(
-                        tipoMovimiento,
-                        ((MainActivity)Activity).usuario,
-                        prov_clave, rch_clave, tbl_clave, "A");
-
-                    _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
-                    _menu?.FindItem(Resource.Id.final_salidas)?.SetEnabled(true);
-                    btnGuardar.Enabled = true;
-                    _activity.DisableNavigationItems(
-                        Resource.Id.navigation_entradas,
-                        Resource.Id.navigation_inventario,
-                        Resource.Id.navigation_salidas);
+                    // Fix A: esperar el resultado antes de actualizar UI.
+                    // Si el INSERT falla, IdConse queda en -1 y la UI no se bloquea.
+                    _ = IniciarSalidaAsync();
                     return true;
 
                 case Resource.Id.final_salidas:
@@ -239,14 +314,23 @@ namespace RFIDTrackBin.fragment
             await ActualizarHoraCierreAsync(idConse);
             await UpdateFechaUltimoMovimientoAsync(idConse);
 
-            // ISSUE 2: Borrar la sesión persistida al cerrarla limpiamente
             LimpiarSesionSalida();
 
             sprProveedor.SetSelection(0);
             sprProveedor.Enabled = true;
             sprRancho.SetSelection(0);
+            sprRancho.Enabled = true;   // Fix B: faltaba re-habilitar
             sprTabla.SetSelection(0);
+            sprTabla.Enabled = true;    // Fix B: faltaba re-habilitar
             btnGuardar.Enabled = false;
+
+            // Limpiar variables de selección
+            prov_clave = "";
+            rch_clave = "";
+            tbl_clave = "";
+            prov_nombre = "";
+            rch_nombre = "";
+            tbl_nombre = "";
 
             _activity.EnableNavigationItems(
                 Resource.Id.navigation_entradas,
@@ -262,6 +346,29 @@ namespace RFIDTrackBin.fragment
         #endregion
 
         #region INICIAR SALIDA
+        /// <summary>
+        /// Wrapper que espera el resultado de InsertarSalidaAsync antes de actualizar la UI.
+        /// Fix A: la versión anterior usaba fire-and-forget, dejando la UI en estado
+        /// "en curso" aunque el INSERT hubiera fallado (IdConse = -1).
+        /// </summary>
+        private async Task IniciarSalidaAsync()
+        {
+            int id = await InsertarSalidaAsync(
+                tipoMovimiento,
+                ((MainActivity)Activity).usuario,
+                prov_clave, rch_clave, tbl_clave, "A");
+
+            if (id <= 0) return; // InsertarSalidaAsync ya mostró el diálogo de error
+
+            _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
+            _menu?.FindItem(Resource.Id.final_salidas)?.SetEnabled(true);
+            btnGuardar.Enabled = true;
+            _activity.DisableNavigationItems(
+                Resource.Id.navigation_entradas,
+                Resource.Id.navigation_inventario,
+                Resource.Id.navigation_salidas);
+        }
+
         public async Task<int> InsertarSalidaAsync(
             string tipoMovimiento, string usuario,
             string entProveedor, string entRancho, string entTabla, string entStatus)
@@ -346,6 +453,8 @@ namespace RFIDTrackBin.fragment
         /// <summary>
         /// Llamado al final de OnViewCreated, después de cargar spinners.
         /// Restaura el estado completo de la sesión si el usuario regresa desde Home.
+        /// Fix C: agrega _isLoadingFlete para bloquear handlers durante SetSelection.
+        /// Fix F: valida que cada spinner se cargó correctamente antes de bloquear UI.
         /// </summary>
         private async Task RestaurarSesionSalidaAsync()
         {
@@ -376,108 +485,120 @@ namespace RFIDTrackBin.fragment
 
             if (!sigueAbierta) { LimpiarSesionSalida(); return; }
 
-            // Restaurar estado en memoria
-            IdConse = savedId;
-            prov_clave = savedProv;
-            rch_clave = savedRancho;
-            tbl_clave = savedTabla;
-
-            // Recargar spinners con los valores guardados
-            // SalidasFragment carga proveedor con una query diferente (prov_clave en lugar de IdProveedor),
-            // por lo que usamos el mismo patrón que funciona en el fragment: selección directa
-            await RestaurarSpinnersSalidaAsync(savedProv, savedRancho, savedTabla);
-
-            // Restaurar estado de UI: sesión en progreso
-            sprProveedor.Enabled = false;
-            sprRancho.Enabled = false;
-            sprTabla.Enabled = false;
-            btnGuardar.Enabled = true;
-
-            _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
-            _menu?.FindItem(Resource.Id.final_salidas)?.SetEnabled(true);
-
-            _activity.DisableNavigationItems(
-                Resource.Id.navigation_entradas,
-                Resource.Id.navigation_inventario,
-                Resource.Id.navigation_salidas);
-
-            Log.Debug(TAG, $"Sesión de salida restaurada desde prefs: ID={IdConse}");
-            Toast.MakeText(_activity, $"Salida #{IdConse} en curso (restaurada)", ToastLength.Short).Show();
-        }
-
-        /// <summary>
-        /// Restaura la selección de los spinners de Salidas.
-        /// Usa los métodos y nombres de columna específicos de SalidasFragment:
-        /// prov_clave/prov_nombre, rch_clave/rch_nombre, tbl_clave/tbl_nombre.
-        /// </summary>
-        private async Task RestaurarSpinnersSalidaAsync(string prov, string rancho, string tabla)
-        {
             try
             {
-                // Paso 1: seleccionar proveedor (ya cargado en LoadProveedorAsync)
-                SeleccionarSpinnerPorValorDirecto(sprProveedor, vwProveedor, "prov_clave", prov, "prov_nombre");
+                _isLoadingFlete = true;
 
-                // Paso 2: cargar ranchos del proveedor y seleccionar
-                await LoadRanchosPorProveedorAsync(prov);
-                SeleccionarSpinnerPorValorDirecto(sprRancho, vwRanchos, "rch_clave", rancho, "rch_nombre");
+                // Desconectar handlers para evitar diálogos y queries durante SetSelection
+                sprProveedor.ItemSelected -= sprProveedor_ItemSelected;
+                sprRancho.ItemSelected -= sprRancho_ItemSelected;
+                sprTabla.ItemSelected -= sprTabla_ItemSelected;
 
-                // Paso 3: cargar tablas del rancho y seleccionar
-                await LoadTablasPorRanchoAsync(rancho, prov);
-                SeleccionarSpinnerPorValorDirecto(sprTabla, vwTablas, "tbl_clave", tabla, "tbl_nombre");
+                // Paso 1: proveedor (ya cargado por LoadProveedorAsync en OnViewCreated)
+                int posProveedor = EncontrarPosicionEnDataTable(vwProveedor, "prov_clave", savedProv);
+                if (posProveedor <= 0)
+                    throw new Exception($"Proveedor '{savedProv}' no encontrado al restaurar.");
+                sprProveedor.SetSelection(posProveedor);
+
+                // Paso 2: ranchos del proveedor
+                await LoadRanchosPorProveedorAsync(savedProv);
+                int posRancho = EncontrarPosicionEnDataTable(vwRanchos, "rch_clave", savedRancho);
+                if (posRancho <= 0)
+                    throw new Exception($"Rancho '{savedRancho}' no encontrado al restaurar.");
+                sprRancho.SetSelection(posRancho);
+
+                // Paso 3: tablas del rancho
+                await LoadTablasPorRanchoAsync(savedRancho, savedProv);
+                int posTabla = EncontrarPosicionEnDataTable(vwTablas, "tbl_clave", savedTabla);
+                if (posTabla <= 0)
+                    throw new Exception($"Tabla '{savedTabla}' no encontrada al restaurar.");
+                sprTabla.SetSelection(posTabla);
+
+                // Restaurar variables de estado
+                IdConse = savedId;
+                prov_clave = vwProveedor.Rows[posProveedor - 1]["prov_clave"].ToString().Trim();
+                prov_nombre = vwProveedor.Rows[posProveedor - 1]["prov_nombre"].ToString().Trim();
+                rch_clave = vwRanchos.Rows[posRancho - 1]["rch_clave"].ToString().Trim();
+                rch_nombre = vwRanchos.Rows[posRancho - 1]["rch_nombre"].ToString().Trim();
+                tbl_clave = vwTablas.Rows[posTabla - 1]["tbl_clave"].ToString().Trim();
+                tbl_nombre = vwTablas.Rows[posTabla - 1]["tbl_nombre"].ToString().Trim();
+
+                // UI: entrada ya en curso → bloquear spinners, habilitar guardar
+                sprProveedor.Enabled = false;
+                sprRancho.Enabled = false;
+                sprTabla.Enabled = false;
+                btnGuardar.Enabled = true;
+
+                _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
+                _menu?.FindItem(Resource.Id.final_salidas)?.SetEnabled(true);
+
+                _activity.DisableNavigationItems(
+                    Resource.Id.navigation_entradas,
+                    Resource.Id.navigation_inventario,
+                    Resource.Id.navigation_salidas);
+
+                Log.Debug(TAG, $"Sesión de salida restaurada desde prefs: ID={IdConse}");
+                Toast.MakeText(_activity, $"Salida #{IdConse} en curso (restaurada)", ToastLength.Short).Show();
+
+                // Reconectar handlers
+                sprProveedor.ItemSelected += sprProveedor_ItemSelected;
+                sprRancho.ItemSelected += sprRancho_ItemSelected;
+                sprTabla.ItemSelected += sprTabla_ItemSelected;
             }
             catch (Exception ex)
             {
-                Log.Error(TAG, $"Error al restaurar spinners de salida: {ex.Message}");
+                Log.Error(TAG, $"Error al restaurar sesión de salida: {ex.Message}");
+                Toast.MakeText(_activity, "Error al restaurar la salida. Se cancelará la sesión.", ToastLength.Long).Show();
+                LimpiarSesionSalida();
+
+                sprProveedor.ItemSelected += sprProveedor_ItemSelected;
+                sprRancho.ItemSelected += sprRancho_ItemSelected;
+                sprTabla.ItemSelected += sprTabla_ItemSelected;
+            }
+            finally
+            {
+                // Fix C: PostDelayed para que los eventos encolados por SetSelection()
+                // se drenen con la guardia activa antes de liberar.
+                new Android.OS.Handler(Android.OS.Looper.MainLooper).PostDelayed(
+                    () => _isLoadingFlete = false, 200);
             }
         }
 
         /// <summary>
-        /// Selecciona un item del Spinner buscando el valor en la DataTable.
-        ///
-        /// HISTORIAL: versiones previas usaban DataTable.Select() con lógica de comillas
-        /// basada en int.TryParse y luego en DataType de columna. Ambos enfoques fallaban
-        /// con valores alfanuméricos ("R21") en columnas INT (Cannot find column [R21]).
-        ///
-        /// SOLUCIÓN DEFINITIVA: usar LINQ — inmune al tipo de columna, compara como string.
+        /// Busca la posición (+1 por el placeholder) de un valor en un DataTable.
+        /// Fix D: versión anterior dependía del adapter del Spinner para la búsqueda final,
+        /// causando falsos negativos si el adapter fue reconstruido o había diferencias de espacios.
+        /// Esta versión busca directamente en el DataTable, sin tocar el Spinner.
         /// </summary>
-        private void SeleccionarSpinnerPorValorDirecto(Spinner spinner, DataTable tabla,
-            string campoClave, string valorClave, string campoNombre)
+        private int EncontrarPosicionEnDataTable(DataTable tabla, string campoClave, string valorClave)
         {
-            if (tabla == null || spinner?.Adapter == null || string.IsNullOrEmpty(valorClave)) return;
-            try
+            if (tabla == null || string.IsNullOrEmpty(valorClave)) return -1;
+
+            if (tabla.Columns[campoClave] == null)
             {
-                if (tabla.Columns[campoClave] == null) return;
-
-                string valorBuscar = valorClave.Trim();
-                DataRow[] rows = tabla.AsEnumerable()
-                    .Where(r => {
-                        if (r[campoClave] == null || r[campoClave] == DBNull.Value) return false;
-                        string cellStr = r[campoClave].ToString().Trim();
-                        if (cellStr == valorBuscar) return true;
-                        // Normalización numérica: "03" == "3", "38" == "38"
-                        if (int.TryParse(valorBuscar, out int vInt) && int.TryParse(cellStr, out int cInt))
-                            return vInt == cInt;
-                        return false;
-                    })
-                    .ToArray();
-
-                if (rows.Length == 0) return;
-
-                string nombre = rows[0][campoNombre]?.ToString()?.Trim() ?? "";
-                for (int i = 0; i < spinner.Adapter.Count; i++)
-                {
-                    if (string.Equals(spinner.Adapter.GetItem(i)?.ToString()?.Trim(),
-                                      nombre, StringComparison.OrdinalIgnoreCase))
-                    {
-                        spinner.SetSelection(i);
-                        return;
-                    }
-                }
+                Log.Warn(TAG, $"EncontrarPosicionEnDataTable: columna '{campoClave}' no existe en {tabla.TableName}");
+                return -1;
             }
-            catch (Exception ex)
+
+            string valorBuscar = valorClave.Trim();
+
+            for (int i = 0; i < tabla.Rows.Count; i++)
             {
-                Log.Error(TAG, $"SeleccionarSpinnerPorValorDirecto: {ex.Message}");
+                object cell = tabla.Rows[i][campoClave];
+                if (cell == null || cell == DBNull.Value) continue;
+
+                string cellStr = cell.ToString().Trim();
+
+                if (string.Equals(cellStr, valorBuscar, StringComparison.OrdinalIgnoreCase))
+                    return i + 1; // +1 por el placeholder "Seleccione..."
+
+                // Normalización numérica: "03" == "3"
+                if (int.TryParse(valorBuscar, out int vInt) && int.TryParse(cellStr, out int cInt) && vInt == cInt)
+                    return i + 1;
             }
+
+            Log.Warn(TAG, $"EncontrarPosicionEnDataTable: '{campoClave}'='{valorClave}' no encontrado en {tabla.TableName} ({tabla.Rows.Count} filas)");
+            return -1;
         }
 
         #region FINALIZAR SALIDA
@@ -921,32 +1042,37 @@ namespace RFIDTrackBin.fragment
 
         private void sprProveedor_ItemSelected(object sender, AdapterView.ItemSelectedEventArgs e)
         {
+            if (_isLoadingFlete) return; // Fix C: ignorar durante restauración/carga programática
             try
             {
-                Spinner spinner = (Spinner)sender;
-                var selectedItem = spinner.GetItemAtPosition(e.Position)?.ToString();
-
-                if (!string.IsNullOrEmpty(selectedItem) && e.Position > 0)
+                if (e.Position == 0)
                 {
-                    Spinner spinnerRancho = vwSalidas.FindViewById<Spinner>(Resource.Id.sprRancho);
-                    Spinner spinnerTabla = vwSalidas.FindViewById<Spinner>(Resource.Id.sprTabla);
-                    spinnerRancho.SetSelection(0);
-                    spinnerTabla.SetSelection(0);
+                    prov_clave = "";
+                    prov_nombre = "";
                     rch_clave = "";
                     tbl_clave = "";
-
                     _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
-                    MainActivity.ShowDialog("Proveedor Seleccionado:", selectedItem.Trim());
-
-                    prov_nombre = selectedItem;
-                    prov_clave = getProv_Clave(prov_nombre);
-
-                    _ = LoadRanchosPorProveedorAsync(prov_clave);
+                    return;
                 }
+
+                Spinner spinner = (Spinner)sender;
+                prov_nombre = spinner.GetItemAtPosition(e.Position)?.ToString()?.Trim() ?? "";
+                prov_clave = getProv_Clave(prov_nombre);
+                rch_clave = "";
+                tbl_clave = "";
+
+                // Resetear spinners dependientes
+                Spinner spinnerRancho = vwSalidas.FindViewById<Spinner>(Resource.Id.sprRancho);
+                Spinner spinnerTabla = vwSalidas.FindViewById<Spinner>(Resource.Id.sprTabla);
+                spinnerRancho.SetSelection(0);
+                spinnerTabla.SetSelection(0);
+
+                _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
+                _ = LoadRanchosPorProveedorAsync(prov_clave);
             }
             catch (Exception ex)
             {
-                Android.Util.Log.Error("Error Spinner", "Error en selección de proveedor: " + ex.Message);
+                Log.Error(TAG, $"sprProveedor_ItemSelected: {ex.Message}");
             }
         }
 
@@ -1011,29 +1137,32 @@ namespace RFIDTrackBin.fragment
 
         private void sprRancho_ItemSelected(object sender, AdapterView.ItemSelectedEventArgs e)
         {
+            if (_isLoadingFlete) return;
             try
             {
-                Spinner spinner = (Spinner)sender;
-                var selectedItem = spinner.GetItemAtPosition(e.Position)?.ToString();
-
-                if (!string.IsNullOrEmpty(selectedItem) && e.Position > 0)
+                if (e.Position == 0)
                 {
-                    Spinner spinnerTabla = vwSalidas.FindViewById<Spinner>(Resource.Id.sprTabla);
-                    spinnerTabla.SetSelection(0);
+                    rch_clave = "";
+                    rch_nombre = "";
                     tbl_clave = "";
-
                     _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
-                    MainActivity.ShowDialog("Rancho Seleccionado:", selectedItem.Trim());
-
-                    rch_nombre = selectedItem;
-                    rch_clave = getRch_Clave(rch_nombre);
-
-                    _ = LoadTablasPorRanchoAsync(rch_clave, prov_clave);
+                    return;
                 }
+
+                Spinner spinner = (Spinner)sender;
+                rch_nombre = spinner.GetItemAtPosition(e.Position)?.ToString()?.Trim() ?? "";
+                rch_clave = getRch_Clave(rch_nombre);
+                tbl_clave = "";
+
+                Spinner spinnerTabla = vwSalidas.FindViewById<Spinner>(Resource.Id.sprTabla);
+                spinnerTabla.SetSelection(0);
+
+                _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
+                _ = LoadTablasPorRanchoAsync(rch_clave, prov_clave);
             }
             catch (Exception ex)
             {
-                Android.Util.Log.Error("Error Spinner", "Error en selección de rancho: " + ex.Message);
+                Log.Error(TAG, $"sprRancho_ItemSelected: {ex.Message}");
             }
         }
 
@@ -1094,22 +1223,25 @@ namespace RFIDTrackBin.fragment
 
         private void sprTabla_ItemSelected(object sender, AdapterView.ItemSelectedEventArgs e)
         {
+            if (_isLoadingFlete) return;
             try
             {
-                Spinner spinner = (Spinner)sender;
-                var selectedItem = spinner.GetItemAtPosition(e.Position)?.ToString();
-
-                if (!string.IsNullOrEmpty(selectedItem) && e.Position > 0)
+                if (e.Position == 0)
                 {
-                    MainActivity.ShowDialog("Tabla Seleccionada:", selectedItem.Trim());
-                    tbl_nombre = selectedItem;
-                    tbl_clave = getTbl_Clave(tbl_nombre);
-                    _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(true);
+                    tbl_clave = "";
+                    tbl_nombre = "";
+                    _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
+                    return;
                 }
+
+                Spinner spinner = (Spinner)sender;
+                tbl_nombre = spinner.GetItemAtPosition(e.Position)?.ToString()?.Trim() ?? "";
+                tbl_clave = getTbl_Clave(tbl_nombre);
+                _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(true);
             }
             catch (Exception ex)
             {
-                Android.Util.Log.Error("Error Spinner", "Error en selección de tabla: " + ex.Message);
+                Log.Error(TAG, $"sprTabla_ItemSelected: {ex.Message}");
             }
         }
 
