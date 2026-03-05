@@ -126,6 +126,8 @@ namespace RFIDTrackBin
         private bool _isMonitoringReader = false;
         private bool _isInitializingReader = false;
 
+        public static bool UseManualScan { get; set; } = false;
+
         protected override void OnCreate(Bundle savedInstanceState)
         {
             base.OnCreate(savedInstanceState);
@@ -237,6 +239,7 @@ namespace RFIDTrackBin
                 }
             });
             #endregion
+            UseManualScan = true; // Activamos el botón manual
         }
 
         #region INICIALIZACION UI

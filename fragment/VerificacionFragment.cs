@@ -19,6 +19,7 @@ using Com.Unitech.Lib.Uhf.Event;
 using Com.Unitech.Lib.Uhf.Params;
 using Com.Unitech.Lib.Uhf.Types;
 using Com.Unitech.Lib.Util.Diagnotics;
+using Google.Android.Material.FloatingActionButton;
 using RFIDTrackBin.enums;
 using RFIDTrackBin.Modal;
 using RFIDTrackBin.Model;
@@ -87,6 +88,9 @@ namespace RFIDTrackBin.fragment
         ProgressBar progressBar;
         RelativeLayout loadingOverlay;
 
+        private FloatingActionButton fabScanManual;
+        private bool _isScanManualActive = false;
+
         public override View OnCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState)
         {
             return inflater.Inflate(Resource.Layout.VerificacionFragment, container, false);
@@ -128,8 +132,36 @@ namespace RFIDTrackBin.fragment
 
             progressBar = view.FindViewById<ProgressBar>(Resource.Id.progressBarGuardar);
             loadingOverlay = view.FindViewById<RelativeLayout>(Resource.Id.loadingOverlay);
-        }
 
+
+
+            // Mostrar botón solo si se desea (podrías condicionarlo a una variable de configuración)
+            fabScanManual.Visibility = ViewStates.Visible;
+            fabScanManual.Click += FabScanManual_Click;
+
+            // En VerificacionFragment, en OnViewCreated:
+            if (MainActivity.UseManualScan)
+                fabScanManual.Visibility = ViewStates.Visible;
+            else
+                fabScanManual.Visibility = ViewStates.Gone;
+        }
+        private void FabScanManual_Click(object sender, EventArgs e)
+        {
+            if (_isScanManualActive)
+            {
+                // Detener inventario
+                DetenerInventario();
+                fabScanManual.SetImageResource(Android.Resource.Drawable.IcMediaPlay);
+                _isScanManualActive = false;
+            }
+            else
+            {
+                // Iniciar inventario
+                IniciarInventario();
+                fabScanManual.SetImageResource(Android.Resource.Drawable.IcMediaPause);
+                _isScanManualActive = true;
+            }
+        }
         private void PlayBeepSound()
         {
             if (beepSoundId != 0)
@@ -143,6 +175,7 @@ namespace RFIDTrackBin.fragment
             totalCajasLeidas = view.FindViewById<TextView>(Resource.Id.txtNumTotalCajas);
             txtTotalAcumulado = view.FindViewById<TextView>(Resource.Id.txtNumTotalAcumulado);
             gvObject = view.FindViewById<GridView>(Resource.Id.gvleidoVerificacion);
+            fabScanManual = view.FindViewById<FloatingActionButton>(Resource.Id.fabScanManual);
         }
 
         public void InitializeSoundPool()
@@ -357,6 +390,13 @@ namespace RFIDTrackBin.fragment
                 _activity.baseReader.RfidUhf.Inventory6c();
                 _activity.baseReader.SetDisplayTags(new DisplayTags(ReadOnceState.Off, BeepAndVibrateState.On));
                 Log.Debug(TAG, "Inventario iniciado");
+
+                // Actualizar botón
+                _activity.RunOnUiThread(() =>
+                {
+                    fabScanManual?.SetImageResource(Android.Resource.Drawable.IcMediaPause);
+                    _isScanManualActive = true;
+                });
             }
             catch (Exception ex)
             {
@@ -382,6 +422,13 @@ namespace RFIDTrackBin.fragment
                 {
                     _activity.baseReader.RfidUhf.Stop();
                     Log.Debug(TAG, "Inventario detenido");
+
+                    // Actualizar botón
+                    _activity.RunOnUiThread(() =>
+                    {
+                        fabScanManual?.SetImageResource(Android.Resource.Drawable.IcMediaPlay);
+                        _isScanManualActive = false;
+                    });
                 }
             }
             catch (Exception ex)

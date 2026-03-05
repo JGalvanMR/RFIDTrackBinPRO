@@ -29,6 +29,7 @@ using System.Data;
 using System.Data.SqlClient;
 using System.Linq;
 using System.Threading.Tasks;
+using static Android.Hardware.Camera;
 using Exception = System.Exception;
 
 namespace RFIDTrackBin.fragment
@@ -1082,6 +1083,17 @@ namespace RFIDTrackBin.fragment
                         return insertados;
                     });
 
+                    if (registrosInsertados > 0)
+                    {
+                        if (sprAreas.SelectedItemPosition <= 0)
+                        {
+                            MainActivity.ShowToast("Seleccione un área.");
+                            return;
+                        }
+                        int indice = sprAreas.SelectedItemPosition - 1;
+                        await ActualizarCatalogoTagsAsync(snapshot, "I", _activity.usuario, sprAreas.SelectedItem?.ToString(), null, null, int.Parse(_activity.idUnidadNegocio), int.Parse(areas.Rows[indice]["IdArea"].ToString()), "A", null);
+                    }
+
                     totalAcumuladoINT += registrosInsertados;
                     txtTotalAcumulado.Text = totalAcumuladoINT.ToString();
 
@@ -1099,6 +1111,85 @@ namespace RFIDTrackBin.fragment
                     btnGuardarInventario.Enabled = true;
                 }
             };
+        }
+
+        public async Task<int> ActualizarCatalogoTagsAsync(List<TagLeido> tags, string tipoMovimiento, string usuario, string invArea, string provClave, string ranClave, int? idUnidadNegocio, int? idUbicacion, string tipoUbicacion, int? idFlete)
+        {
+            if (tags == null || tags.Count == 0)
+                return 0;
+
+            const string query = @"
+    UPDATE Tb_RFID_Catalogo
+    SET
+        FechaUltimoMovimiento = @Fecha,
+        Tipo = @TipoMovimiento,
+        Usuario = @Usuario,
+
+        InvArea = CASE WHEN @TipoMovimiento = 'I' THEN @InvArea ELSE InvArea END,
+
+        Prov_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @ProvClave ELSE Prov_Clave END,
+        Ran_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @RanClave ELSE Ran_Clave END,
+
+        IdUnidadNegocioActual = @IdUnidadNegocio,
+        IdUbicacionActual = @IdUbicacion,
+        TipoUbicacion = @TipoUbicacion,
+
+        id_flete = CASE WHEN @TipoMovimiento = 'E' THEN @IdFlete ELSE id_flete END
+
+    WHERE IdClaveTag = @IdClaveTag";
+
+            try
+            {
+                return await Task.Run(() =>
+                {
+                    int actualizados = 0;
+
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    conn.Open();
+
+                    using SqlCommand cmd = new SqlCommand(query, conn);
+
+                    cmd.Parameters.Add("@Fecha", SqlDbType.DateTime);
+                    cmd.Parameters.Add("@TipoMovimiento", SqlDbType.Char);
+                    cmd.Parameters.Add("@Usuario", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@InvArea", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@ProvClave", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@RanClave", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@IdUnidadNegocio", SqlDbType.Int);
+                    cmd.Parameters.Add("@IdUbicacion", SqlDbType.Int);
+                    cmd.Parameters.Add("@TipoUbicacion", SqlDbType.Char);
+                    cmd.Parameters.Add("@IdFlete", SqlDbType.Int);
+                    cmd.Parameters.Add("@IdClaveTag", SqlDbType.VarChar);
+
+                    foreach (var tag in tags)
+                    {
+                        cmd.Parameters["@Fecha"].Value = tag.FechaLectura;
+                        cmd.Parameters["@TipoMovimiento"].Value = tipoMovimiento;
+                        cmd.Parameters["@Usuario"].Value = usuario;
+
+                        cmd.Parameters["@InvArea"].Value = invArea ?? (object)DBNull.Value;
+                        cmd.Parameters["@ProvClave"].Value = provClave ?? (object)DBNull.Value;
+                        cmd.Parameters["@RanClave"].Value = ranClave ?? (object)DBNull.Value;
+
+                        cmd.Parameters["@IdUnidadNegocio"].Value = idUnidadNegocio ?? (object)DBNull.Value;
+                        cmd.Parameters["@IdUbicacion"].Value = idUbicacion ?? (object)DBNull.Value;
+                        cmd.Parameters["@TipoUbicacion"].Value = tipoUbicacion ?? (object)DBNull.Value;
+
+                        cmd.Parameters["@IdFlete"].Value = idFlete ?? (object)DBNull.Value;
+
+                        cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
+
+                        actualizados += cmd.ExecuteNonQuery();
+                    }
+
+                    return actualizados;
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error actualizando catálogo: {ex}");
+                return -1;
+            }
         }
         #endregion
 
