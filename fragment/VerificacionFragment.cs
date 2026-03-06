@@ -24,6 +24,7 @@ using RFIDTrackBin.enums;
 using RFIDTrackBin.Modal;
 using RFIDTrackBin.Model;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -32,7 +33,7 @@ using Exception = System.Exception;
 
 namespace RFIDTrackBin.fragment
 {
-    public class VerificacionFragment : BaseFragment, IReaderEventListener, IRfidUhfEventListener, MainReceiver.IEventLitener, View.IOnTouchListener
+    public class VerificacionFragment : BaseFragment, IReaderEventListener, IRfidUhfEventListener, MainReceiver.IEventLitener, View.IOnTouchListener, IDisposable
     {
         static string TAG = typeof(VerificacionFragment).Name;
 
@@ -55,15 +56,21 @@ namespace RFIDTrackBin.fragment
         private DateTime _lastTriggerTime = DateTime.MinValue;
         private Handler _stopHandler;
         private bool _stopPending = false;
+        private CancellationTokenSource _inventoryCts;
 
-        // Para optimizar actualizaciones del GridView
-        private readonly List<TagLeido> _pendingTags = new List<TagLeido>();
+        // Para optimizar actualizaciones del GridView - Thread-safe
+        private readonly ConcurrentQueue<TagLeido> _pendingTags = new ConcurrentQueue<TagLeido>();
         private readonly Handler _uiHandler = new Handler(Looper.MainLooper);
+        private readonly object _updateLock = new object();
         private bool _updateScheduled = false;
         private int totalCajasLeidasINT = 0;
 
-        // Carga del catálogo
+        // Thread-safe HashSet para evitar duplicados
+        private readonly ConcurrentDictionary<string, byte> _epcSet = new ConcurrentDictionary<string, byte>();
+
+        // Carga del catálogo - Async sin bloqueo
         private Task _catalogoLoadTask;
+        private CancellationTokenSource _catalogoCts;
 
         #region Views
         TextView connectedState;
@@ -75,6 +82,7 @@ namespace RFIDTrackBin.fragment
         #region SoundPool
         private SoundPool soundPool;
         private int beepSoundId;
+        private readonly object _soundLock = new object();
         #endregion
 
         MainReceiver mReceiver;
@@ -99,73 +107,110 @@ namespace RFIDTrackBin.fragment
         public override void OnCreate(Bundle savedInstanceState)
         {
             base.OnCreate(savedInstanceState);
-            _catalogoLoadTask = Task.Run(() => _activity?.getTb_RFID_Catalogo());
+            _catalogoCts = new CancellationTokenSource();
+            _catalogoLoadTask = Task.Run(() => _activity?.getTb_RFID_Catalogo(), _catalogoCts.Token);
             _stopHandler = new Handler(Looper.MainLooper);
+            _inventoryCts = new CancellationTokenSource();
         }
 
-        public override async void OnViewCreated(View view, Bundle savedInstanceState)
+        public override void OnViewCreated(View view, Bundle savedInstanceState)
         {
             base.OnViewCreated(view, savedInstanceState);
-
-            bool ok = await MainActivity.BtHelper.EnsureBluetoothAsync();
-            if (!ok)
-            {
-                Toast.MakeText(Activity, "Bluetooth es obligatorio para el inventario.", ToastLength.Short).Show();
-                return;
-            }
-
-            FindViews(view);
-            InitializeSoundPool();
-
-            HasOptionsMenu = true;
-
-            mReceiver = new MainReceiver(this);
-            IntentFilter filter = new IntentFilter();
-            filter.AddAction(MainReceiver.rfidGunPressed);
-            filter.AddAction(MainReceiver.rfidGunReleased);
-            _activity.RegisterReceiver(mReceiver, filter);
-
-            adapter = new myGVitemAdapter(_activity, tagEPCList);
-            gvObject.Adapter = adapter;
-
-            _activity.EnableNavigationItems(Resource.Id.navigation_entradas, Resource.Id.navigation_salidas);
-
-            progressBar = view.FindViewById<ProgressBar>(Resource.Id.progressBarGuardar);
-            loadingOverlay = view.FindViewById<RelativeLayout>(Resource.Id.loadingOverlay);
-
-
-
-            // Mostrar botón solo si se desea (podrías condicionarlo a una variable de configuración)
-            fabScanManual.Visibility = ViewStates.Visible;
-            fabScanManual.Click += FabScanManual_Click;
-
-            // En VerificacionFragment, en OnViewCreated:
-            if (MainActivity.UseManualScan)
-                fabScanManual.Visibility = ViewStates.Visible;
-            else
-                fabScanManual.Visibility = ViewStates.Gone;
+            InitializeAsync(view);
         }
+
+        private async void InitializeAsync(View view)
+        {
+            try
+            {
+                bool ok = await MainActivity.BtHelper.EnsureBluetoothAsync();
+                if (!ok)
+                {
+                    Toast.MakeText(Activity, "Bluetooth es obligatorio para el inventario.", ToastLength.Short).Show();
+                    return;
+                }
+
+                FindViews(view);
+                InitializeSoundPool();
+
+                HasOptionsMenu = true;
+
+                mReceiver = new MainReceiver(this);
+                IntentFilter filter = new IntentFilter();
+                filter.AddAction(MainReceiver.rfidGunPressed);
+                filter.AddAction(MainReceiver.rfidGunReleased);
+                _activity.RegisterReceiver(mReceiver, filter);
+
+                adapter = new myGVitemAdapter(_activity, tagEPCList);
+                gvObject.Adapter = adapter;
+
+                _activity.EnableNavigationItems(Resource.Id.navigation_entradas, Resource.Id.navigation_salidas);
+
+                progressBar = view.FindViewById<ProgressBar>(Resource.Id.progressBarGuardar);
+                loadingOverlay = view.FindViewById<RelativeLayout>(Resource.Id.loadingOverlay);
+
+                // Configurar FAB según configuración
+                if (MainActivity.UseManualScan)
+                    fabScanManual.Visibility = ViewStates.Visible;
+                else
+                    fabScanManual.Visibility = ViewStates.Gone;
+
+                fabScanManual.Click += FabScanManual_Click;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error en InitializeAsync: {ex.Message}");
+                MainActivity.ShowToast("Error al inicializar fragmento");
+            }
+        }
+
         private void FabScanManual_Click(object sender, EventArgs e)
         {
             if (_isScanManualActive)
             {
-                // Detener inventario
                 DetenerInventario();
-                fabScanManual.SetImageResource(Android.Resource.Drawable.IcMediaPlay);
-                _isScanManualActive = false;
             }
             else
             {
-                // Iniciar inventario
                 IniciarInventario();
-                fabScanManual.SetImageResource(Android.Resource.Drawable.IcMediaPause);
-                _isScanManualActive = true;
             }
         }
+
+        private void UpdateFabState(bool isScanning)
+        {
+            _activity.RunOnUiThread(() =>
+            {
+                if (fabScanManual == null) return;
+
+                if (isScanning)
+                {
+                    fabScanManual.SetImageResource(Android.Resource.Drawable.IcMediaPause);
+                    _isScanManualActive = true;
+                }
+                else
+                {
+                    fabScanManual.SetImageResource(Android.Resource.Drawable.IcMediaPlay);
+                    _isScanManualActive = false;
+                }
+            });
+        }
+
         private void PlayBeepSound()
         {
-            if (beepSoundId != 0)
-                soundPool.Play(beepSoundId, 1.0f, 1.0f, 0, 0, 1.0f);
+            lock (_soundLock)
+            {
+                if (beepSoundId != 0 && soundPool != null && !_isDisposed)
+                {
+                    try
+                    {
+                        soundPool.Play(beepSoundId, 1.0f, 1.0f, 0, 0, 1.0f);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warn(TAG, $"Error al reproducir sonido: {ex.Message}");
+                    }
+                }
+            }
         }
 
         private void FindViews(View view)
@@ -180,24 +225,36 @@ namespace RFIDTrackBin.fragment
 
         public void InitializeSoundPool()
         {
-            if (Build.VERSION.SdkInt >= BuildVersionCodes.Lollipop)
+            lock (_soundLock)
             {
-                var audioAttributes = new AudioAttributes.Builder()
-                    .SetUsage(AudioUsageKind.AssistanceSonification)
-                    .SetContentType(AudioContentType.Sonification)
-                    .Build();
+                if (_isDisposed) return;
 
-                soundPool = new SoundPool.Builder()
-                    .SetMaxStreams(5)
-                    .SetAudioAttributes(audioAttributes)
-                    .Build();
-            }
-            else
-            {
-                soundPool = new SoundPool(5, Stream.Music, 0);
-            }
+                try
+                {
+                    if (Build.VERSION.SdkInt >= BuildVersionCodes.Lollipop)
+                    {
+                        var audioAttributes = new AudioAttributes.Builder()
+                            .SetUsage(AudioUsageKind.AssistanceSonification)
+                            .SetContentType(AudioContentType.Sonification)
+                            .Build();
 
-            beepSoundId = soundPool.Load(_activity, Resource.Drawable.beep, 1);
+                        soundPool = new SoundPool.Builder()
+                            .SetMaxStreams(5)
+                            .SetAudioAttributes(audioAttributes)
+                            .Build();
+                    }
+                    else
+                    {
+                        soundPool = new SoundPool(5, Stream.Music, 0);
+                    }
+
+                    beepSoundId = soundPool.Load(_activity, Resource.Drawable.beep, 1);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(TAG, $"Error inicializando SoundPool: {ex.Message}");
+                }
+            }
         }
 
         #region CICLO DE VIDA
@@ -249,42 +306,93 @@ namespace RFIDTrackBin.fragment
             Log.Debug(TAG, "OnPause - Deteniendo inventario");
             DetenerInventarioInmediato();
             _stopHandler.RemoveCallbacksAndMessages(null);
+            CancelPendingUpdates();
             base.OnPause();
             Log.Debug(TAG, "OnPause completado");
         }
 
         public override void OnDestroy()
         {
-            _isDisposed = true;
-            _stopHandler.RemoveCallbacksAndMessages(null);
-            DetenerInventarioInmediato();
-
-            try
-            {
-                _activity?.baseReader?.RemoveListener(this);
-                _activity?.baseReader?.RfidUhf?.RemoveListener(this);
-            }
-            catch { }
-
-            try
-            {
-                _activity?.UnregisterReceiver(mReceiver);
-            }
-            catch { }
-
-            try
-            {
-                soundPool?.Release();
-                soundPool = null;
-                tagEPCList?.Clear();
-                tagEPCList = null;
-                if (gvObject != null) { gvObject.Adapter = null; gvObject.Dispose(); gvObject = null; }
-                adapter?.Dispose();
-                adapter = null;
-            }
-            catch { }
-
+            Dispose(true);
             base.OnDestroy();
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+
+            if (disposing)
+            {
+                _isDisposed = true;
+
+                // Cancelar tokens
+                _inventoryCts?.Cancel();
+                _catalogoCts?.Cancel();
+
+                // Detener handlers
+                _stopHandler?.RemoveCallbacksAndMessages(null);
+                CancelPendingUpdates();
+
+                // Detener inventario inmediatamente
+                DetenerInventarioInmediato();
+
+                // Remover listeners
+                try
+                {
+                    _activity?.baseReader?.RemoveListener(this);
+                    _activity?.baseReader?.RfidUhf?.RemoveListener(this);
+                }
+                catch { }
+
+                // Unregister receiver
+                try
+                {
+                    if (mReceiver != null)
+                        _activity?.UnregisterReceiver(mReceiver);
+                }
+                catch { }
+
+                // Liberar recursos de audio
+                lock (_soundLock)
+                {
+                    try
+                    {
+                        soundPool?.Release();
+                        soundPool = null;
+                    }
+                    catch { }
+                }
+
+                // Limpiar colecciones
+                tagEPCList?.Clear();
+                while (_pendingTags.TryDequeue(out _)) { }
+                _epcSet?.Clear();
+
+                // Liberar vistas
+                try
+                {
+                    if (gvObject != null)
+                    {
+                        gvObject.Adapter = null;
+                        gvObject.Dispose();
+                        gvObject = null;
+                    }
+                    adapter?.Dispose();
+                    adapter = null;
+                    fabScanManual = null;
+                }
+                catch { }
+
+                // Disponer tokens
+                _inventoryCts?.Dispose();
+                _catalogoCts?.Dispose();
+            }
         }
         #endregion
 
@@ -319,10 +427,12 @@ namespace RFIDTrackBin.fragment
             if (state == ActionState.Stop)
             {
                 UpdateText(IDType.Inventory, GetString(Resource.String.inventory));
+                UpdateFabState(false);
             }
             else if (state == ActionState.Inventory6c)
             {
                 UpdateText(IDType.Inventory, GetString(Resource.String.stop));
+                UpdateFabState(true);
             }
         }
 
@@ -344,7 +454,6 @@ namespace RFIDTrackBin.fragment
 
             if (state == KeyState.KeyDown)
             {
-                // Cancelar cualquier parada pendiente
                 _stopHandler.RemoveCallbacksAndMessages(null);
                 _stopPending = false;
 
@@ -357,13 +466,12 @@ namespace RFIDTrackBin.fragment
             {
                 if (_activity.baseReader.Action == ActionState.Inventory6c)
                 {
-                    // Programar parada con un pequeño retraso para evitar rebotes
                     if (!_stopPending)
                     {
                         _stopPending = true;
                         _stopHandler.PostDelayed(() =>
                         {
-                            if (_stopPending)
+                            if (_stopPending && !_isDisposed)
                             {
                                 DetenerInventario();
                                 _stopPending = false;
@@ -378,11 +486,12 @@ namespace RFIDTrackBin.fragment
         {
             lock (_inventoryLock)
             {
-                if (_isInventoryRunning) return;
+                if (_isInventoryRunning || _isDisposed) return;
                 if ((DateTime.Now - _lastInventoryStop).TotalMilliseconds < INVENTORY_DEBOUNCE_MS)
                     return;
                 _isInventoryRunning = true;
                 _lastInventoryStart = DateTime.Now;
+                _inventoryCts = new CancellationTokenSource();
             }
 
             try
@@ -390,18 +499,13 @@ namespace RFIDTrackBin.fragment
                 _activity.baseReader.RfidUhf.Inventory6c();
                 _activity.baseReader.SetDisplayTags(new DisplayTags(ReadOnceState.Off, BeepAndVibrateState.On));
                 Log.Debug(TAG, "Inventario iniciado");
-
-                // Actualizar botón
-                _activity.RunOnUiThread(() =>
-                {
-                    fabScanManual?.SetImageResource(Android.Resource.Drawable.IcMediaPause);
-                    _isScanManualActive = true;
-                });
+                UpdateFabState(true);
             }
             catch (Exception ex)
             {
                 Log.Error(TAG, $"Error al iniciar inventario: {ex.Message}");
                 lock (_inventoryLock) { _isInventoryRunning = false; }
+                UpdateFabState(false);
             }
         }
 
@@ -409,11 +513,12 @@ namespace RFIDTrackBin.fragment
         {
             lock (_inventoryLock)
             {
-                if (!_isInventoryRunning) return;
-                if ((DateTime.Now - _lastInventoryStart).TotalMilliseconds < 200) // Mínimo 200ms
+                if (!_isInventoryRunning || _isDisposed) return;
+                if ((DateTime.Now - _lastInventoryStart).TotalMilliseconds < 200)
                     return;
                 _isInventoryRunning = false;
                 _lastInventoryStop = DateTime.Now;
+                _inventoryCts?.Cancel();
             }
 
             try
@@ -422,18 +527,15 @@ namespace RFIDTrackBin.fragment
                 {
                     _activity.baseReader.RfidUhf.Stop();
                     Log.Debug(TAG, "Inventario detenido");
-
-                    // Actualizar botón
-                    _activity.RunOnUiThread(() =>
-                    {
-                        fabScanManual?.SetImageResource(Android.Resource.Drawable.IcMediaPlay);
-                        _isScanManualActive = false;
-                    });
                 }
             }
             catch (Exception ex)
             {
                 Log.Error(TAG, $"Error al detener inventario: {ex.Message}");
+            }
+            finally
+            {
+                UpdateFabState(false);
             }
         }
 
@@ -441,12 +543,15 @@ namespace RFIDTrackBin.fragment
         {
             _stopHandler.RemoveCallbacksAndMessages(null);
             _stopPending = false;
+            _inventoryCts?.Cancel();
+
             lock (_inventoryLock)
             {
                 if (!_isInventoryRunning) return;
                 _isInventoryRunning = false;
                 _lastInventoryStop = DateTime.Now;
             }
+
             try
             {
                 if (_activity?.baseReader?.RfidUhf != null && _activity.baseReader.Action == ActionState.Inventory6c)
@@ -455,6 +560,15 @@ namespace RFIDTrackBin.fragment
                 }
             }
             catch { }
+        }
+
+        private void CancelPendingUpdates()
+        {
+            lock (_updateLock)
+            {
+                _updateScheduled = false;
+                _uiHandler.RemoveCallbacksAndMessages(null);
+            }
         }
 
         public void OnReaderStateChanged(BaseReader reader, ConnectState state, Java.Lang.Object @params)
@@ -482,7 +596,6 @@ namespace RFIDTrackBin.fragment
         public void OnRfidUhfReadTag(BaseUHF uhf, string tag, Java.Lang.Object @params)
         {
             if (_isDisposed || !IsAdded || _activity == null || tagEPCList == null) return;
-
             if (StringUtil.IsNullOrEmpty(tag)) return;
 
             float rssi = 0;
@@ -500,94 +613,95 @@ namespace RFIDTrackBin.fragment
                 UpdateText(IDType.TagTID, tid);
             }
 
-            if (!ValidaEPC(tag)) return;
-
-            lock (_pendingTags)
-            {
-                if (_pendingTags.Any(t => t.EPC == tag) || tagEPCList.Any(t => t.EPC == tag))
-                    return;
-                _pendingTags.Add(new TagLeido { EPC = tag, RSSI = rssi, FechaLectura = DateTime.Now });
-            }
-
-            ScheduleGridUpdate();
-
-            Interlocked.Increment(ref totalCajasLeidasINT);
-            _activity.RunOnUiThread(() =>
-            {
-                if (totalCajasLeidas != null)
-                    totalCajasLeidas.Text = totalCajasLeidasINT.ToString();
-            });
-
-            UpdateText(IDType.TagRSSI, rssi.ToString());
+            // Validación async sin bloquear
+            _ = ProcessTagAsync(tag, rssi);
         }
 
-        //private void ScheduleGridUpdate()
-        //{
-        //    if (_updateScheduled) return;
-        //    _updateScheduled = true;
-        //    _uiHandler.PostDelayed(() =>
-        //    {
-        //        _updateScheduled = false;
-        //        List<TagLeido> tagsToAdd;
-        //        lock (_pendingTags)
-        //        {
-        //            if (_pendingTags.Count == 0) return;
-        //            tagsToAdd = new List<TagLeido>(_pendingTags);
-        //            _pendingTags.Clear();
-        //        }
-        //        _activity.RunOnUiThread(() =>
-        //        {
-        //            if (_isDisposed || tagEPCList == null || adapter == null) return;
-        //            tagEPCList.AddRange(tagsToAdd);
-        //            adapter.NotifyDataSetChanged();
-        //        });
-        //    }, 200);
-        //}
-        private readonly HashSet<string> _epcSet = new HashSet<string>();
+        private async Task ProcessTagAsync(string tag, float rssi)
+        {
+            try
+            {
+                // Validar contra catálogo de forma async
+                bool isValid = await ValidaEPCAsync(tag);
+                if (!isValid) return;
+
+                // Verificar duplicados de forma thread-safe
+                if (!_epcSet.TryAdd(tag, 0))
+                    return;
+
+                var tagLeido = new TagLeido
+                {
+                    EPC = tag,
+                    RSSI = rssi,
+                    FechaLectura = DateTime.Now
+                };
+
+                _pendingTags.Enqueue(tagLeido);
+                ScheduleGridUpdate();
+
+                Interlocked.Increment(ref totalCajasLeidasINT);
+
+                _activity.RunOnUiThread(() =>
+                {
+                    if (totalCajasLeidas != null && !_isDisposed)
+                        totalCajasLeidas.Text = totalCajasLeidasINT.ToString();
+                });
+
+                UpdateText(IDType.TagRSSI, rssi.ToString());
+                PlayBeepSound();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error procesando tag: {ex.Message}");
+            }
+        }
 
         private void ScheduleGridUpdate()
         {
-            if (_updateScheduled)
-                return;
-
-            _updateScheduled = true;
+            lock (_updateLock)
+            {
+                if (_updateScheduled || _isDisposed) return;
+                _updateScheduled = true;
+            }
 
             _uiHandler.PostDelayed(() =>
             {
-                _updateScheduled = false;
-
-                List<TagLeido> tagsToAdd;
-
-                lock (_pendingTags)
+                try
                 {
-                    if (_pendingTags.Count == 0)
-                        return;
+                    if (_isDisposed) return;
 
-                    tagsToAdd = new List<TagLeido>(_pendingTags);
-                    _pendingTags.Clear();
-                }
-
-                if (_isDisposed || tagEPCList == null || adapter == null)
-                    return;
-
-                int added = 0;
-
-                foreach (var tag in tagsToAdd)
-                {
-                    // evita duplicados
-                    if (_epcSet.Add(tag.EPC))
+                    List<TagLeido> tagsToAdd = new List<TagLeido>();
+                    while (_pendingTags.TryDequeue(out var tag))
                     {
-                        tagEPCList.Add(tag);
-                        added++;
+                        tagsToAdd.Add(tag);
+                    }
+
+                    if (tagsToAdd.Count == 0) return;
+                    if (tagEPCList == null || adapter == null) return;
+
+                    _activity.RunOnUiThread(() =>
+                    {
+                        try
+                        {
+                            if (_isDisposed || tagEPCList == null || adapter == null) return;
+
+                            tagEPCList.AddRange(tagsToAdd);
+                            adapter.NotifyDataSetChanged();
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Error(TAG, $"Error actualizando UI: {ex.Message}");
+                        }
+                    });
+                }
+                finally
+                {
+                    lock (_updateLock)
+                    {
+                        _updateScheduled = false;
                     }
                 }
-
-                if (added > 0)
-                {
-                    adapter.NotifyDataSetChanged();
-                }
-
-            }, 200); // batch update cada 200ms
+            }, 200);
         }
         #endregion
 
@@ -740,29 +854,36 @@ namespace RFIDTrackBin.fragment
 
             Task.Run(() =>
             {
-                string keyName = "", keyCode = "";
-                switch (Build.Device)
+                try
                 {
-                    case "HT730": keyName = "TRIGGER_GUN"; keyCode = "298"; break;
-                    case "PA768": keyName = "SCAN_GUN"; keyCode = "294"; break;
-                    default: return;
+                    string keyName = "", keyCode = "";
+                    switch (Build.Device)
+                    {
+                        case "HT730": keyName = "TRIGGER_GUN"; keyCode = "298"; break;
+                        case "PA768": keyName = "SCAN_GUN"; keyCode = "294"; break;
+                        default: return;
+                    }
+
+                    sendUssScan(false);
+                    var ctx = MainActivity.getInstance().ApplicationContext;
+                    KeymappingCtrl.GetInstance(ctx).ExportKeyMappings(getKeymappingPath());
+                    KeymappingCtrl.GetInstance(ctx).EnableKeyMapping(true);
+                    tempKeyCode = KeymappingCtrl.GetInstance(ctx).GetKeyMapping(keyName);
+
+                    bool wakeup = tempKeyCode.GetBoolean("wakeUp");
+                    Bundle result = KeymappingCtrl.GetInstance(ctx).AddKeyMappings(
+                        keyName, keyCode, wakeup,
+                        MainReceiver.rfidGunPressed, getParams(tempKeyCode.GetBundle("broadcastDownParams")),
+                        MainReceiver.rfidGunReleased, getParams(tempKeyCode.GetBundle("broadcastUpParams")),
+                        getParams(tempKeyCode.GetBundle("startActivityParams")));
+
+                    if (result.GetInt("errorCode") == 0) Log.Debug(TAG, "Set Gun Key Code success");
+                    else Log.Error(TAG, "Set Gun Key Code failed: " + result.GetString("errorMsg"));
                 }
-
-                sendUssScan(false);
-                var ctx = MainActivity.getInstance().ApplicationContext;
-                KeymappingCtrl.GetInstance(ctx).ExportKeyMappings(getKeymappingPath());
-                KeymappingCtrl.GetInstance(ctx).EnableKeyMapping(true);
-                tempKeyCode = KeymappingCtrl.GetInstance(ctx).GetKeyMapping(keyName);
-
-                bool wakeup = tempKeyCode.GetBoolean("wakeUp");
-                Bundle result = KeymappingCtrl.GetInstance(ctx).AddKeyMappings(
-                    keyName, keyCode, wakeup,
-                    MainReceiver.rfidGunPressed, getParams(tempKeyCode.GetBundle("broadcastDownParams")),
-                    MainReceiver.rfidGunReleased, getParams(tempKeyCode.GetBundle("broadcastUpParams")),
-                    getParams(tempKeyCode.GetBundle("startActivityParams")));
-
-                if (result.GetInt("errorCode") == 0) Log.Debug(TAG, "Set Gun Key Code success");
-                else Log.Error(TAG, "Set Gun Key Code failed: " + result.GetString("errorMsg"));
+                catch (Exception ex)
+                {
+                    Log.Error(TAG, $"Error en setUseGunKeyCode: {ex.Message}");
+                }
             });
         }
 
@@ -771,11 +892,18 @@ namespace RFIDTrackBin.fragment
             if (tempKeyCode == null) return;
             Task.Run(() =>
             {
-                Bundle result = KeymappingCtrl.GetInstance(
-                    MainActivity.getInstance().ApplicationContext).ImportKeyMappings(getKeymappingPath());
-                if (result.GetInt("errorCode") == 0) Log.Debug(TAG, "restoreGunKeyCode success");
-                else Log.Error(TAG, "restoreGunKeyCode failed: " + result.GetString("errorMsg"));
-                tempKeyCode = null;
+                try
+                {
+                    Bundle result = KeymappingCtrl.GetInstance(
+                        MainActivity.getInstance().ApplicationContext).ImportKeyMappings(getKeymappingPath());
+                    if (result.GetInt("errorCode") == 0) Log.Debug(TAG, "restoreGunKeyCode success");
+                    else Log.Error(TAG, "restoreGunKeyCode failed: " + result.GetString("errorMsg"));
+                    tempKeyCode = null;
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(TAG, $"Error en restoreGunKeyCode: {ex.Message}");
+                }
             });
         }
 
@@ -783,26 +911,46 @@ namespace RFIDTrackBin.fragment
         {
             _activity.RunOnUiThread(() =>
             {
-                tagEPCList.Clear();
-                adapter?.NotifyDataSetChanged();
-                totalCajasLeidasINT = 0;
-                if (totalCajasLeidas != null)
-                    totalCajasLeidas.Text = "0";
+                try
+                {
+                    tagEPCList?.Clear();
+                    _epcSet?.Clear();
+                    while (_pendingTags.TryDequeue(out _)) { }
+                    adapter?.NotifyDataSetChanged();
+                    totalCajasLeidasINT = 0;
+                    if (totalCajasLeidas != null)
+                        totalCajasLeidas.Text = "0";
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(TAG, $"Error en ClearGridView: {ex.Message}");
+                }
             });
         }
 
         public bool OnTouch(View v, MotionEvent e) => false;
 
         #region VALIDAR TAG VS CATÁLOGO
-        private bool ValidaEPC(string EPC)
+        private async Task<bool> ValidaEPCAsync(string EPC)
         {
-            if (_catalogoLoadTask != null && !_catalogoLoadTask.IsCompleted)
+            try
             {
-                _catalogoLoadTask.Wait(2000);
+                // Esperar carga del catálogo de forma async (sin bloquear UI)
+                if (_catalogoLoadTask != null && !_catalogoLoadTask.IsCompleted)
+                {
+                    await Task.WhenAny(_catalogoLoadTask, Task.Delay(2000));
+                }
+
+                if (_activity.CatalogoEPCSet == null || _activity.CatalogoEPCSet.Count == 0)
+                    return true;
+
+                return _activity.CatalogoEPCSet.Contains(EPC.Trim());
             }
-            if (_activity.CatalogoEPCSet == null || _activity.CatalogoEPCSet.Count == 0)
-                return true;
-            return _activity.CatalogoEPCSet.Contains(EPC.Trim());
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error en ValidaEPCAsync: {ex.Message}");
+                return true; // Fallback: permitir si hay error
+            }
         }
         #endregion
     }

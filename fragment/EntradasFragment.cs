@@ -127,6 +127,7 @@ namespace RFIDTrackBin.fragment
         private const string PREF_E_RANCHO = "RchClaveEntrada";
         private const string PREF_E_TABLA = "TblClaveEntrada";
         private const string PREF_E_ACTIVA = "EntradaActiva";
+        private const string PREF_E_FLETE_ID = "FleteIdEntrada"; // opcional, para futuras mejoras
         #endregion
 
         public override View OnCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState)
@@ -603,11 +604,9 @@ namespace RFIDTrackBin.fragment
         /// Fix Bug B: la versión anterior usaba fire-and-forget, dejando la UI en estado
         /// "en curso" aunque el INSERT hubiera fallado (IdConse = -1).
         /// </summary>
-        private async Task IniciarEntradaAsync()
+        private async Task IniciarEntradaAsyncOG()
         {
-            int id = await InsertarEntradaAsync(tipoMovimiento,
-                ((MainActivity)Activity).usuario,
-                prov_clave, rch_clave, tbl_clave, "A");
+            int id = await InsertarEntradaAsyncOG(tipoMovimiento, ((MainActivity)Activity).usuario, prov_clave, rch_clave, tbl_clave, "A");
 
             if (id <= 0) return; // InsertarEntradaAsync ya mostró el diálogo de error
 
@@ -619,15 +618,13 @@ namespace RFIDTrackBin.fragment
                 Resource.Id.navigation_salidas,
                 Resource.Id.navigation_entradas);
         }
-        public async Task<int> InsertarEntradaAsync(
-            string tipoMovimiento, string usuario,
-            string entProveedor, string entRancho, string entTabla, string entStatus)
+        public async Task<int> InsertarEntradaAsyncOG(string tipoMovimiento, string usuario, string entProveedor, string entRancho, string entTabla, string entStatus)
         {
             IdConse = -1;
 
             const string query = @"
                 INSERT INTO [dbo].[Tb_RFID_Mstr]
-                    (TipoMov, FechaMov, Usuario, Prov_Clave, Ran_Clave, Tab_Clave, Mstr_Status)
+                    (TipoMov, FechaMov, Usuario, Prov_Clave, Ran_Clave, Tab_Clave, Mstr_Status )
                 VALUES
                     (@TipoMov, GETDATE(), @Usuario, @Prov_Clave, @Ran_Clave, @Tab_Clave, @Mstr_Status);
                 SELECT SCOPE_IDENTITY();";
@@ -662,6 +659,140 @@ namespace RFIDTrackBin.fragment
             }
             catch (Exception ex)
             {
+                MainActivity.ShowDialog("Error al iniciar entrada en Base de Datos:", ex.Message);
+            }
+
+            return IdConse;
+        }
+        #endregion
+
+        #region INICIAR ENTRADA
+        /// <summary>
+        /// Wrapper que espera el resultado de InsertarEntradaAsync antes de actualizar la UI.
+        /// Fix Bug B: la versión anterior usaba fire-and-forget, dejando la UI en estado
+        /// "en curso" aunque el INSERT hubiera fallado (IdConse = -1).
+        /// </summary>
+        private async Task IniciarEntradaAsync()
+        {
+            int id = await InsertarEntradaAsync(tipoMovimiento,
+                ((MainActivity)Activity).usuario,
+                prov_clave, rch_clave, tbl_clave, "A", int.Parse(_activity.idUnidadNegocio), selectedFleteId);
+
+            if (id <= 0) return; // InsertarEntradaAsync ya mostró el diálogo de error
+
+            _menu?.FindItem(Resource.Id.inicio_entradas)?.SetEnabled(false);
+            _menu?.FindItem(Resource.Id.final_entradas)?.SetEnabled(true);
+            btnGuardar.Enabled = true;
+            _activity.DisableNavigationItems(
+                Resource.Id.navigation_inventario,
+                Resource.Id.navigation_salidas,
+                Resource.Id.navigation_entradas);
+        }
+
+        /// <summary>
+        /// Inserta un nuevo registro maestro de movimiento (entrada) en Tb_RFID_Mstr.
+        /// Resuelve las claves foráneas (FK) a partir de los códigos de proveedor, rancho y tabla.
+        /// </summary>
+        public async Task<int> InsertarEntradaAsync(
+            string tipoMovimiento, string usuario,
+            string entProveedor, string entRancho, string entTabla, string entStatus, int idUnidadNegocio, int? idFlete = null)
+        {
+            IdConse = -1;
+
+            // Query actualizado según estructura de tabla Tb_RFID_Mstr
+            // Se insertan: campos base + FKs resueltas desde catálogos
+            const string query = @"
+        INSERT INTO [dbo].[Tb_RFID_Mstr]
+            (TipoMov, 
+             FechaMov, 
+             Usuario, 
+             Prov_Clave, 
+             Ran_Clave, 
+             Tab_Clave, 
+             Mstr_Status,
+             IdProveedorFK,
+             IdRanchoFK,
+             IdTablaFK,
+             EsTransferenciaInterna,
+             id_flete)
+        VALUES
+            (@TipoMov, 
+             GETDATE(), 
+             @Usuario, 
+             @Prov_Clave, 
+             @Ran_Clave, 
+             @Tab_Clave, 
+             @Mstr_Status,
+             (SELECT TOP 1 IdProveedor FROM Tb_RFID_Proveedores WHERE Prov_Clave = @Prov_Clave AND IdUnidadNegocio = @IdUnidadNegocio),
+             (SELECT TOP 1 IdRancho FROM Tb_RFID_Ranchos WHERE Ran_Clave = @Ran_Clave AND IdUnidadNegocio = @IdUnidadNegocio),
+             (SELECT TOP 1 IdTabla FROM Tb_RFID_Tablas WHERE Tab_Clave = @Tab_Clave AND IdRancho = (SELECT TOP 1 IdRancho FROM Tb_RFID_Ranchos WHERE Ran_Clave = @Ran_Clave AND IdUnidadNegocio = @IdUnidadNegocio)),
+             0,
+             @id_flete);
+        SELECT SCOPE_IDENTITY();";
+
+            try
+            {
+                int newId = await Task.Run(() =>
+                {
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    using SqlCommand cmd = new SqlCommand(query, conn);
+
+                    // Parámetros de entrada
+                    cmd.Parameters.AddWithValue("@TipoMov", tipoMovimiento ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Usuario", usuario ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Prov_Clave", entProveedor ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Ran_Clave", entRancho ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Tab_Clave", entTabla ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Mstr_Status", entStatus ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@IdUnidadNegocio", idUnidadNegocio);
+                    // Parámetro opcional - Flete
+
+                    cmd.Parameters.AddWithValue("@id_flete", (object)idFlete ?? DBNull.Value);
+
+                    conn.Open();
+                    object result = cmd.ExecuteScalar();
+
+                    return (result != null && result != DBNull.Value && int.TryParse(result.ToString(), out int id)) ? id : -1;
+                });
+
+                IdConse = newId;
+
+                if (IdConse > 0)
+                {
+                    // ISSUE 2: Persistir la sesión activa para sobrevivir Home → regreso
+                    GuardarSesionEntrada();
+                    Log.Debug(TAG, $"Entrada insertada en BD: ID={IdConse}, Prov={entProveedor}, Ran={entRancho}, Tab={entTabla}");
+
+                    Toast.MakeText(Activity, "Inicio De Entrada...", ToastLength.Short).Show();
+
+                    // Deshabilitar controles de selección
+                    sprProveedor.Enabled = false;
+                    sprRancho.Enabled = false;
+                    sprTabla.Enabled = false;
+                }
+                else
+                {
+                    MainActivity.ShowDialog("Error al iniciar entrada", "No se pudo obtener el ID de la entrada creada.");
+                }
+            }
+            catch (SqlException sqlEx)
+            {
+                Log.Error(TAG, $"Error SQL al insertar entrada: {sqlEx.Message}, Number: {sqlEx.Number}");
+
+                // Mensaje específico para errores de FK
+                if (sqlEx.Number == 547) // Foreign key constraint violation
+                {
+                    MainActivity.ShowDialog("Error de validación",
+                        "El proveedor, rancho o tabla seleccionado no existe en el catálogo. Verifique los datos.");
+                }
+                else
+                {
+                    MainActivity.ShowDialog("Error SQL al iniciar entrada en Base de Datos:", sqlEx.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error general al insertar entrada: {ex.Message}");
                 MainActivity.ShowDialog("Error al iniciar entrada en Base de Datos:", ex.Message);
             }
 
@@ -772,6 +903,7 @@ namespace RFIDTrackBin.fragment
             editor.PutString(PREF_E_RANCHO, rch_clave ?? "");
             editor.PutString(PREF_E_TABLA, tbl_clave ?? "");
             editor.PutBoolean(PREF_E_ACTIVA, true);
+            editor.PutString(PREF_E_FLETE_ID, selectedFleteId > 0 ? selectedFleteId.ToString() : "");
             editor.Apply();
             Log.Debug(TAG, $"Entrada guardada en prefs: ID={IdConse}");
         }
@@ -790,6 +922,7 @@ namespace RFIDTrackBin.fragment
             string savedProv = prefs.GetString(PREF_E_PROV, "");
             string savedRancho = prefs.GetString(PREF_E_RANCHO, "");
             string savedTabla = prefs.GetString(PREF_E_TABLA, "");
+            string savedIdFlete = prefs.GetString(PREF_E_FLETE_ID, "");
 
             if (savedId <= 0) { LimpiarSesionEntrada(); return; }
 
@@ -850,6 +983,7 @@ namespace RFIDTrackBin.fragment
                 tbl_clave = vwTablas.Rows[posTabla - 1]["Tab_Clave"].ToString().Trim();
                 tbl_id = Convert.ToInt32(vwTablas.Rows[posTabla - 1]["IdTabla"]);
                 tbl_nombre = vwTablas.Rows[posTabla - 1]["NombreTabla"].ToString().Trim();
+                selectedFleteId = int.Parse(savedIdFlete);
 
                 // UI: entrada ya en curso → bloquear spinners, habilitar guardar
                 spinnerProv.Enabled = false;

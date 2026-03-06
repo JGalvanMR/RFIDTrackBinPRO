@@ -239,7 +239,7 @@ namespace RFIDTrackBin
                 }
             });
             #endregion
-            UseManualScan = true; // Activamos el botón manual
+            UseManualScan = false; // Activamos el botón manual
         }
 
         #region INICIALIZACION UI
