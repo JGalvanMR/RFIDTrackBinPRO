@@ -18,32 +18,60 @@ namespace RFIDTrackBin
             _tagEPCList = tagEPCList;
         }
 
-        public override long GetItemId(int position)
-        {
-            return position;
-        }
+        public override long GetItemId(int position) => position;
+        public override int Count => _tagEPCList?.Count ?? 0;
+        public override TagLeido this[int position] => _tagEPCList?[position];
 
         public override View GetView(int position, View convertView, ViewGroup parent)
         {
+            ViewHolder holder;
+
             try
             {
-                var item = _tagEPCList[position];
                 if (convertView == null)
-                    convertView = _CurrentContext.LayoutInflater.Inflate(Resource.Layout.custGridViewItem, null);
+                {
+                    convertView = _CurrentContext.LayoutInflater
+                        .Inflate(Resource.Layout.custGridViewItem, parent, false);
 
-                convertView.FindViewById<TextView>(Resource.Id.txtName).Text = item.EPC;
-                convertView.FindViewById<TextView>(Resource.Id.txtAge).Text = $"{item.RSSI:F1} dBm";
+                    holder = new ViewHolder
+                    {
+                        txtName = convertView.FindViewById<TextView>(Resource.Id.txtName),
+                        txtAge = convertView.FindViewById<TextView>(Resource.Id.txtAge)
+                    };
+
+                    convertView.Tag = holder;
+                }
+                else
+                {
+                    holder = (ViewHolder)convertView.Tag;
+                }
+
+                var item = _tagEPCList[position];
+                holder.txtName.Text = item.EPC;
+                holder.txtAge.Text = $"{item.RSSI:F1} dBm";
             }
             catch (Exception e)
             {
-                System.Diagnostics.Debug.WriteLine($"Error en MyGVitemAdapter: {e.Message}");
+                // FIX A-1: Loguear error en lugar de silenciarlo.
+                AppLogger.LogError(e);
+
+                // FIX A-1: Garantizar que GetView NUNCA devuelva null.
+                // Devolver null desde GetView causa NullReferenceException en el sistema
+                // de GridView/ListView de Android. Si el inflate falló usamos layout fallback.
+                if (convertView == null)
+                {
+                    convertView = _CurrentContext.LayoutInflater
+                        .Inflate(Android.Resource.Layout.SimpleListItem1, parent, false);
+                }
             }
 
             return convertView;
         }
 
-        public override int Count => _tagEPCList?.Count ?? 0;
-
-        public override TagLeido this[int position] => _tagEPCList?[position];
+        class ViewHolder : Java.Lang.Object
+        {
+            public TextView txtName;
+            public TextView txtAge;
+        }
     }
 }

@@ -1,57 +1,51 @@
 <?xml version="1.0" encoding="utf-8"?>
-<AbsoluteLayout
+
+<LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="wrap_content"
+    android:layout_width="match_parent"
     android:layout_height="wrap_content"
+    android:orientation="horizontal"
     android:background="@drawable/bgdefault"
-    android:elevation="3dp">
+    android:padding="8dp"
+    android:gravity="center_vertical"
+    android:elevation="2dp">
+
+	<ImageView
+        android:id="@+id/imgPers"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:src="@drawable/shuttlebin330"
+        android:scaleType="centerInside"
+        android:layout_marginEnd="8dp"/>
 
 	<LinearLayout
-        android:id="@+id/linearLayoutHorizontal"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:padding="6dp"
-        android:gravity="center_vertical">
+        android:layout_weight="1"
+        android:orientation="vertical">
 
-		<ImageView
-            android:id="@+id/imgPers"
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:src="@drawable/shuttlebin330"
-            android:scaleType="centerInside"
-            android:layout_marginEnd="6dp"/>
-
-		<LinearLayout
-            android:id="@+id/linearLayout1"
-            android:layout_width="wrap_content"
+		<TextView
+            android:id="@+id/txtName"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:minWidth="25dp"
-            android:minHeight="25dp">
+            android:text="300833B2DDD9014000000001"
+            android:textColor="#111111"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end"/>
 
-			<TextView
-                android:id="@+id/txtName"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Text"
-                android:textColor="#000000"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:paddingStart="3dp"/>
-
-			<TextView
-                android:id="@+id/txtAge"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Text"
-                android:textColor="#000000"
-                android:textSize="12sp"
-                android:paddingStart="3dp"
-                android:layout_marginTop="2dp"/>
-
-		</LinearLayout>
+		<TextView
+            android:id="@+id/txtAge"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="ShuttleBin 330"
+            android:textColor="#666666"
+            android:textSize="13sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:layout_marginTop="2dp"/>
 
 	</LinearLayout>
 
-</AbsoluteLayout>
+</LinearLayout>
