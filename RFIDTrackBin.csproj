@@ -77,6 +77,7 @@
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Data" />
+    <Reference Include="System.Data.DataSetExtensions" />
     <Reference Include="System.Xml" />
     <Reference Include="System.Core" />
     <Reference Include="Mono.Android" />
@@ -95,7 +96,6 @@
     <Compile Include="fragment\InventarioFragment.cs" />
     <Compile Include="fragment\SalidasFragment.cs" />
     <Compile Include="fragment\EntradasFragment.cs" />
-    <Compile Include="fragment\HomeFragment.cs" />
     <Compile Include="fragment\VerificacionFragment.cs" />
     <Compile Include="GuardaLocal.cs" />
     <Compile Include="Helpers\BluetoothHelper.cs" />
@@ -326,6 +326,12 @@
       <SubType>Designer</SubType>
     </AndroidResource>
     <AndroidResource Include="Resources\drawable\bgdefault2.xml">
+      <SubType>Designer</SubType>
+    </AndroidResource>
+    <AndroidResource Include="Resources\drawable\circle_background.xml">
+      <SubType>Designer</SubType>
+    </AndroidResource>
+    <AndroidResource Include="Resources\drawable\ic_chevron_right.xml">
       <SubType>Designer</SubType>
     </AndroidResource>
     <Content Include="Resources\layout\dialog_edit_text.xml" />

@@ -21,6 +21,7 @@ using Com.Unitech.Lib.Uhf.Params;
 using Com.Unitech.Lib.Uhf.Types;
 using Com.Unitech.Lib.Util.Diagnotics;
 using Java.Lang;
+using Mysqlx.Crud;
 using Newtonsoft.Json;
 using RFIDTrackBin.enums;
 using RFIDTrackBin.Modal;
@@ -28,7 +29,9 @@ using RFIDTrackBin.Model;
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Data;
 using System.Data.SqlClient;
+using System.Linq;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
@@ -62,9 +65,9 @@ namespace RFIDTrackBin.fragment
         TextView connectedState;
         TextView totalCajasLeidas;
         TextView txtTotalAcumulado;
-        Spinner sprProveedor;
-        Spinner sprRancho;
-        Spinner sprTabla;
+        private Spinner sprProveedor;
+        private Spinner sprRancho;
+        private Spinner sprTabla;
         #endregion
 
         #region SoundPool
@@ -79,19 +82,16 @@ namespace RFIDTrackBin.fragment
         private List<TagLeido> tagEPCList = new List<TagLeido>();
         private myGVitemAdapter adapter;
 
-        DataSet ds = new DataSet();
+        // FIX B1: Eliminado "DataSet ds" — declarado pero nunca utilizado en ninguna
+        //         parte del fragmento. Instanciar DataSet tiene un coste de memoria no trivial.
 
-        // FIX: DataTables locales — NO static para evitar contaminación entre fragmentos
+        // DataTables locales — NO static para evitar contaminación entre instancias del fragmento
         public DataTable vwProveedor = new DataTable("vwProveedor");
         public DataTable vwRanchos = new DataTable("vwRanchos");
         public DataTable vwTablas = new DataTable("vwTablas");
 
         int totalCajasLeidasINT = 0;
         int totalAcumuladoINT = 0;
-
-        // FIX #7: Eliminado campo "SqlConnection thisConnection" que no se cerraba.
-        // FIX: Eliminado campo "MySqlConnection mySqlConn" — credenciales hardcodeadas
-        //      y NUNCA se usaba (la conexión MySQL se obtiene a través de GetURL / HttpClient).
 
         string IdClaveTag;
         View vwEntradas;
@@ -103,6 +103,7 @@ namespace RFIDTrackBin.fragment
         string prov_clave;
         string rch_clave;
         string tbl_clave;
+        private bool _isLoadingFlete = false;
 
         IMenu _menu;
         int IdConse;
@@ -116,6 +117,17 @@ namespace RFIDTrackBin.fragment
         List<FleteItem> fpList = new List<FleteItem>();
         private myGVitemAdapterFP fpAdapter;
         private Android.App.AlertDialog fletesPendientesDialog;
+        private AlertDialog _dialogoFletes;
+        private int? selectedFleteId = null;
+        #endregion
+        #region PERSISTENCIA DE ENTRADAS
+        private const string PREFS_ENTRADAS = "rfid_entradas_prefs";
+        private const string PREF_E_ID = "IdConseEntrada";
+        private const string PREF_E_PROV = "ProvClaveEntrada";
+        private const string PREF_E_RANCHO = "RchClaveEntrada";
+        private const string PREF_E_TABLA = "TblClaveEntrada";
+        private const string PREF_E_ACTIVA = "EntradaActiva";
+        private const string PREF_E_FLETE_ID = "FleteIdEntrada"; // opcional, para futuras mejoras
         #endregion
 
         public override View OnCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState)
@@ -135,9 +147,6 @@ namespace RFIDTrackBin.fragment
             }
 
             FindViews(view);
-
-            // FIX #4: Carga en background
-            await LoadProveedorAsync(view, Convert.ToInt32(_activity.idUnidadNegocio));
 
             SetButtonClick();
             InitializeSoundPool();
@@ -162,6 +171,22 @@ namespace RFIDTrackBin.fragment
 
             progressBar = view.FindViewById<ProgressBar>(Resource.Id.progressBarGuardar);
             loadingOverlay = view.FindViewById<RelativeLayout>(Resource.Id.loadingOverlay);
+
+            // Si hay sesión pendiente, restaurar; si no, cargar proveedores normalmente
+            if (HaySesionEntradaPendiente())
+            {
+                MostrarDialogoEntradaPendiente();
+            }
+            else
+            {
+                await LoadProveedorAsync(vwEntradas, Convert.ToInt32(_activity.idUnidadNegocio)).ConfigureAwait(false);
+            }
+        }
+
+        private bool HaySesionEntradaPendiente()
+        {
+            var prefs = _activity.GetSharedPreferences(PREFS_ENTRADAS, FileCreationMode.Private);
+            return prefs.GetBoolean(PREF_E_ACTIVA, false);
         }
 
         public void InitializeSoundPool()
@@ -202,22 +227,12 @@ namespace RFIDTrackBin.fragment
             switch (item.ItemId)
             {
                 case Resource.Id.inicio_entradas:
-                    // FIX #4: InsertarEntrada ahora async — no bloquea UI
-                    _ = InsertarEntradaAsync(tipoMovimiento,
-                        ((MainActivity)Activity).usuario,
-                        prov_clave, rch_clave, tbl_clave, "A");
-
-                    _menu?.FindItem(Resource.Id.inicio_entradas)?.SetEnabled(false);
-                    _menu?.FindItem(Resource.Id.final_entradas)?.SetEnabled(true);
-                    btnGuardar.Enabled = true;
-                    _activity.DisableNavigationItems(
-                        Resource.Id.navigation_inventario,
-                        Resource.Id.navigation_salidas,
-                        Resource.Id.navigation_entradas);
+                    // Fix Bug B: esperar el resultado antes de actualizar la UI.
+                    // Si el INSERT falla, IdConse queda en -1 y no se bloquea nada.
+                    _ = IniciarEntradaAsync();
                     return true;
 
                 case Resource.Id.final_entradas:
-                    // FIX #4: Operaciones de cierre encadenadas async
                     _ = FinalizarEntradaAsync(IdConse);
                     return true;
 
@@ -230,17 +245,26 @@ namespace RFIDTrackBin.fragment
             }
         }
 
-        // Helper para encadenar las operaciones de cierre async
         private async Task FinalizarEntradaAsync(int idConse)
         {
             await ActualizarHoraCierreAsync(idConse);
             await UpdateFechaUltimoMovimientoAsync(idConse);
 
+            LimpiarSesionEntrada();
+
             sprProveedor.SetSelection(0);
             sprProveedor.Enabled = true;
             sprRancho.SetSelection(0);
+            sprRancho.Enabled = true;   // Fix Bug C: faltaba re-habilitar
             sprTabla.SetSelection(0);
+            sprTabla.Enabled = true;    // Fix Bug C: faltaba re-habilitar
             btnGuardar.Enabled = false;
+
+            // Limpiar variables de selección
+            prov_clave = "";
+            rch_clave = "";
+            tbl_clave = "";
+            selectedFleteId = null;
 
             _activity.EnableNavigationItems(
                 Resource.Id.navigation_inventario,
@@ -262,7 +286,6 @@ namespace RFIDTrackBin.fragment
             View dialogView = inflater.Inflate(Resource.Layout.FletesPendientes, null);
 
             gvFP = dialogView.FindViewById<GridView>(Resource.Id.gvFletesPendientes);
-
             if (gvFP == null)
             {
                 Toast.MakeText(_activity, "No se encontró el GridView", ToastLength.Long).Show();
@@ -278,16 +301,19 @@ namespace RFIDTrackBin.fragment
 
             await CargarFletesPendientes();
 
-            var builder = new Android.App.AlertDialog.Builder(_activity, Resource.Style.AppTheme_CustomAlertDialog);
+            var builder = new AlertDialog.Builder(_activity, Resource.Style.AppTheme_CustomAlertDialog);
             builder.SetView(dialogView);
             builder.SetTitle("Fletes Pendientes");
-            builder.SetCancelable(false);
+            builder.SetCancelable(true); // Permite cerrar tocando fuera
             builder.SetPositiveButton("Cerrar", (s, e) =>
             {
                 fpList.Clear();
                 fpAdapter.NotifyDataSetChanged();
+                // El diálogo se cierra automáticamente
             });
-            builder.Show();
+
+            _dialogoFletes = builder.Show();
+            _dialogoFletes.DismissEvent += (s, e) => _dialogoFletes = null; // Limpiar referencia
         }
 
         private async Task CargarFletesPendientes()
@@ -296,7 +322,6 @@ namespace RFIDTrackBin.fragment
 
             try
             {
-                // FIX #4: GetURL es async — no bloquea
                 string url = await GetURL(Convert.ToInt32(_activity.idUnidadNegocio));
 
                 if (string.IsNullOrEmpty(url))
@@ -339,65 +364,227 @@ namespace RFIDTrackBin.fragment
             }
         }
 
-        private void GvFletesPendientes_ItemClick(object sender, AdapterView.ItemClickEventArgs e)
+        private async void GvFletesPendientes_ItemClick(object sender, AdapterView.ItemClickEventArgs e)
         {
             try
             {
                 var flete = fpList[e.Position];
-                prov_clave = flete.IdProveedor;
-                rch_clave = flete.IdRancho;
-                tbl_clave = flete.IdTabla;
-                ActualizarSpinnersDesdeFlete(flete);
-
-                Toast.MakeText(_activity,
-                    $"Proveedor: {prov_clave}\nRancho: {rch_clave}\nTabla: {tbl_clave}",
-                    ToastLength.Short).Show();
+                selectedFleteId = Convert.ToInt32(flete.IdFlete);
+                await ActualizarSpinnersDesdeFletesAsync(flete);
             }
             catch (Exception ex)
             {
                 Toast.MakeText(_activity, ex.Message, ToastLength.Long).Show();
             }
+            finally
+            {
+                _dialogoFletes?.Dismiss(); // siempre se cierra, con o sin excepción
+            }
         }
 
-        private async void ActualizarSpinnersDesdeFlete(FleteItem flete)
+        private async Task ActualizarSpinnersDesdeFletesAsync(FleteItem flete)
         {
+            _isLoadingFlete = true;
             try
             {
-                if (vwEntradas == null) return;
+                if (vwEntradas == null)
+                    throw new Exception("La vista de entradas no está disponible.");
 
                 Spinner spinnerProv = vwEntradas.FindViewById<Spinner>(Resource.Id.sprProveedor);
                 Spinner spinnerRancho = vwEntradas.FindViewById<Spinner>(Resource.Id.sprRancho);
                 Spinner spinnerTabla = vwEntradas.FindViewById<Spinner>(Resource.Id.sprTabla);
 
+                // Desconectar handlers mientras se programan las selecciones
+                spinnerProv.ItemSelected -= sprProveedor_ItemSelected;
+                spinnerRancho.ItemSelected -= sprRancho_ItemSelected;
+                spinnerTabla.ItemSelected -= sprTabla_ItemSelected;
 
-                LoadProveedorAsync(vwEntradas, Convert.ToInt32(_activity.idUnidadNegocio)).Wait();
-                SeleccionarSpinner(spinnerProv, vwProveedor, "IdProveedor", flete.IdProveedor, "NombreProveedor");
-                await Task.Delay(200);
-                LoadRanchosAsync(Convert.ToInt32(flete.IdProveedor)).Wait();
-                SeleccionarSpinner(spinnerRancho, vwRanchos, "IdRancho", flete.IdRancho, "NombreRancho");
-                await Task.Delay(200);
-                LoadTablasAsync(Convert.ToInt32(flete.IdRancho)).Wait();
-                SeleccionarSpinner(spinnerTabla, vwTablas, "IdTabla", flete.IdTabla, "NombreTabla");
+                prov_clave = flete.IdProveedor;
+                rch_clave = flete.IdRancho;
+                tbl_clave = flete.IdTabla;
+
+                #region PROVEEDOR
+                await LoadProveedorAsync(vwEntradas, Convert.ToInt32(_activity.idUnidadNegocio));
+
+                int posProveedor = EncontrarPosicionEnDataTable(vwProveedor, "Prov_Clave", flete.IdProveedor);
+
+                if (posProveedor <= 0)
+                {
+                    // Flujo de flete del API: el proveedor puede no existir en esta unidad → intentar crear
+                    Log.Warn(TAG, $"Proveedor '{flete.IdProveedor}' no encontrado. Intentando crear desde origen...");
+                    int unidadActual = Convert.ToInt32(_activity.idUnidadNegocio);
+                    await CrearProveedorDesdeOrigen(flete.IdProveedor, unidadOrigen: unidadActual);
+                    await LoadProveedorAsync(vwEntradas, unidadActual);
+                    posProveedor = EncontrarPosicionEnDataTable(vwProveedor, "Prov_Clave", flete.IdProveedor);
+                }
+
+                if (posProveedor <= 0)
+                {
+                    string msg = $"Proveedor '{flete.IdProveedor}' no encontrado en esta unidad de negocio.";
+                    Log.Error(TAG, msg);
+                    Toast.MakeText(_activity, msg, ToastLength.Long).Show();
+                    throw new Exception(msg);
+                }
+
+                spinnerProv.SetSelection(posProveedor);
+                int idProveedor = Convert.ToInt32(vwProveedor.Rows[posProveedor - 1]["IdProveedor"]);
+                prov_clave = vwProveedor.Rows[posProveedor - 1]["Prov_Clave"].ToString().Trim();
+                #endregion
+
+                #region RANCHO
+                await LoadRanchosAsync(idProveedor);
+
+                int posRancho = EncontrarPosicionEnDataTable(vwRanchos, "Ran_Clave", flete.IdRancho);
+
+                if (posRancho <= 0)
+                {
+                    // Flujo de flete del API: el rancho puede no existir en esta unidad → intentar crear
+                    Log.Warn(TAG, $"Rancho '{flete.IdRancho}' no encontrado. Intentando crear desde origen...");
+                    int unidadActual = Convert.ToInt32(_activity.idUnidadNegocio);
+                    await CrearRanchoDesdeOrigen(flete.IdProveedor, flete.IdRancho, flete.Orde, idProveedor, unidadOrigen: unidadActual);
+                    await LoadRanchosAsync(idProveedor);
+                    posRancho = EncontrarPosicionEnDataTable(vwRanchos, "Ran_Clave", flete.IdRancho);
+                }
+
+                if (posRancho <= 0)
+                {
+                    string msg = $"Rancho '{flete.IdRancho}' no encontrado para el proveedor '{flete.IdProveedor}'.";
+                    Log.Error(TAG, msg);
+                    Toast.MakeText(_activity, msg, ToastLength.Long).Show();
+                    throw new Exception(msg);
+                }
+
+                spinnerRancho.SetSelection(posRancho);
+                int idRancho = Convert.ToInt32(vwRanchos.Rows[posRancho - 1]["IdRancho"]);
+                rch_clave = vwRanchos.Rows[posRancho - 1]["Ran_Clave"].ToString().Trim();
+                #endregion
+
+                #region TABLA
+                await LoadTablaAsync(idRancho);
+
+                int posTabla = EncontrarPosicionEnDataTable(vwTablas, "Tab_Clave", flete.IdTabla);
+                Log.Debug(TAG, $"Tablas cargadas: {vwTablas.Rows.Count} — posición para '{flete.IdTabla}': {posTabla}");
+
+                if (posTabla <= 0)
+                {
+                    // Flujo de flete del API: la tabla puede no existir para este rancho → intentar crear
+                    // unidadOrigen dinámico — nunca hardcodeado, evita UNIQUE CONSTRAINT
+                    Log.Warn(TAG, $"Tabla '{flete.IdTabla}' no encontrada para rancho '{flete.IdRancho}'. Creando...");
+                    int unidadActual = Convert.ToInt32(_activity.idUnidadNegocio);
+                    bool creada = await CrearTablaDesdeOrigen(
+                        flete.IdProveedor, flete.IdRancho, flete.IdTabla,
+                        idRancho, unidadOrigen: unidadActual);
+
+                    if (creada)
+                    {
+                        await LoadTablaAsync(idRancho);
+                        posTabla = EncontrarPosicionEnDataTable(vwTablas, "Tab_Clave", flete.IdTabla);
+                    }
+                }
+
+                if (posTabla <= 0)
+                {
+                    string msg = $"Tabla '{flete.IdTabla}' no encontrada para el rancho '{flete.IdRancho}'.";
+                    Log.Error(TAG, msg);
+                    Toast.MakeText(_activity, msg, ToastLength.Long).Show();
+                    throw new Exception(msg);
+                }
+
+                spinnerTabla.SetSelection(posTabla);
+                tbl_id = Convert.ToInt32(vwTablas.Rows[posTabla - 1]["IdTabla"]);
+                tbl_nombre = vwTablas.Rows[posTabla - 1]["NombreTabla"].ToString().Trim();
+                tbl_clave = vwTablas.Rows[posTabla - 1]["Tab_Clave"].ToString().Trim();
+                #endregion
+
+                // Fix: spinners activos, guardar inactivo — el usuario debe presionar Inicio
+                spinnerProv.Enabled = true;
+                spinnerRancho.Enabled = true;
+                spinnerTabla.Enabled = true;
+                btnGuardar.Enabled = false;
+
+                _menu?.FindItem(Resource.Id.inicio_entradas)?.SetEnabled(true);
+                _menu?.FindItem(Resource.Id.final_entradas)?.SetEnabled(false);
+
+                _activity.EnableNavigationItems(
+                    Resource.Id.navigation_inventario,
+                    Resource.Id.navigation_salidas);
+
+                Toast.MakeText(_activity,
+                    $"Flete cargado:\nProveedor: {prov_clave}\nRancho: {rch_clave}\nTabla: {tbl_clave}",
+                    ToastLength.Short).Show();
             }
             catch (Exception ex)
             {
-                Toast.MakeText(_activity, ex.Message, ToastLength.Long).Show();
+                Log.Error(TAG, $"Error en ActualizarSpinnersDesdeFletesAsync: {ex.Message}");
+                throw;
+            }
+            finally
+            {
+                // Reconectar handlers — siempre -= antes de += para evitar doble suscripción
+                Spinner spinnerProv = vwEntradas?.FindViewById<Spinner>(Resource.Id.sprProveedor);
+                Spinner spinnerRancho = vwEntradas?.FindViewById<Spinner>(Resource.Id.sprRancho);
+                Spinner spinnerTabla = vwEntradas?.FindViewById<Spinner>(Resource.Id.sprTabla);
+
+                if (spinnerProv != null) { spinnerProv.ItemSelected -= sprProveedor_ItemSelected; spinnerProv.ItemSelected += sprProveedor_ItemSelected; }
+                if (spinnerRancho != null) { spinnerRancho.ItemSelected -= sprRancho_ItemSelected; spinnerRancho.ItemSelected += sprRancho_ItemSelected; }
+                if (spinnerTabla != null) { spinnerTabla.ItemSelected -= sprTabla_ItemSelected; spinnerTabla.ItemSelected += sprTabla_ItemSelected; }
+
+                // Fix B2: PostDelayed para que los eventos encolados por SetSelection()
+                // se drenen con la guardia aún activa y no disparen LoadTablaAsync de nuevo.
+                new Android.OS.Handler(Android.OS.Looper.MainLooper).PostDelayed(
+                    () => _isLoadingFlete = false, 200);
             }
         }
 
-        private void SeleccionarSpinner(Spinner spinner, DataTable tabla, string campoClave, string valorClave, string campoNombre)
+        /// <summary>
+        /// Busca la posición (+1 por el placeholder) de un valor en un DataTable.
+        ///
+        /// HISTORIAL DE BUGS:
+        ///   v1-v3 — Dependían del adapter del Spinner o de DataTable.Select().
+        ///           Fallaban por diferencias de tipo, espacios, o adapter desactualizado.
+        ///
+        /// SOLUCIÓN DEFINITIVA (v4):
+        ///   Buscar directamente en el DataTable con iteración simple.
+        ///   El índice retornado es i+1 porque la posición 0 del adapter es el placeholder.
+        /// </summary>
+        private int EncontrarPosicionEnDataTable(DataTable tabla, string campoClave, string valorClave)
         {
-            if (tabla == null || spinner?.Adapter == null) return;
+            if (tabla == null || string.IsNullOrEmpty(valorClave)) return -1;
 
-            var row = tabla.Select($"{campoClave} = '{valorClave}'");
-            if (row.Length == 0) return;
+            if (tabla.Columns[campoClave] == null)
+            {
+                Log.Warn(TAG, $"EncontrarPosicionEnDataTable: columna '{campoClave}' no existe en {tabla.TableName}");
+                return -1;
+            }
 
-            string nombre = row[0][campoNombre].ToString().Trim();
-            int index = ((ArrayAdapter)spinner.Adapter).GetPosition(nombre);
-            if (index >= 0) spinner.SetSelection(index);
+            string valorBuscar = valorClave.Trim();
+
+            for (int i = 0; i < tabla.Rows.Count; i++)
+            {
+                object cell = tabla.Rows[i][campoClave];
+                if (cell == null || cell == DBNull.Value) continue;
+
+                string cellStr = cell.ToString().Trim();
+
+                if (string.Equals(cellStr, valorBuscar, StringComparison.OrdinalIgnoreCase))
+                    return i + 1;
+
+                // Normalización numérica: "03" == "3"
+                if (int.TryParse(valorBuscar, out int vInt) && int.TryParse(cellStr, out int cInt) && vInt == cInt)
+                    return i + 1;
+            }
+
+            Log.Warn(TAG, $"EncontrarPosicionEnDataTable: '{campoClave}'='{valorClave}' no encontrado en {tabla.TableName} ({tabla.Rows.Count} filas)");
+            return -1;
         }
 
-        // FIX #4: GetURL es async — operación de red no bloquea el UI thread
+        // Mantenido para compatibilidad — ya no se usa en el flujo de flete
+        private void SeleccionarSpinner(Spinner spinner, DataTable tabla, string campoClave, string valorClave, string campoNombre)
+        {
+            int pos = EncontrarPosicionEnDataTable(tabla, campoClave, valorClave);
+            if (pos >= 0) spinner.SetSelection(pos);
+        }
+
         public async Task<string> GetURL(int IdUnidadNegocio)
         {
             return await Task.Run(() =>
@@ -413,16 +600,32 @@ namespace RFIDTrackBin.fragment
         #endregion
 
         #region INICIAR ENTRADA
-        // FIX #4: Versión async — INSERT no bloquea el UI thread
-        public async Task<int> InsertarEntradaAsync(
-            string tipoMovimiento, string usuario,
-            string entProveedor, string entRancho, string entTabla, string entStatus)
+        /// <summary>
+        /// Wrapper que espera el resultado de InsertarEntradaAsync antes de actualizar la UI.
+        /// Fix Bug B: la versión anterior usaba fire-and-forget, dejando la UI en estado
+        /// "en curso" aunque el INSERT hubiera fallado (IdConse = -1).
+        /// </summary>
+        private async Task IniciarEntradaAsyncOG()
+        {
+            int id = await InsertarEntradaAsyncOG(tipoMovimiento, ((MainActivity)Activity).usuario, prov_clave, rch_clave, tbl_clave, "A");
+
+            if (id <= 0) return; // InsertarEntradaAsync ya mostró el diálogo de error
+
+            _menu?.FindItem(Resource.Id.inicio_entradas)?.SetEnabled(false);
+            _menu?.FindItem(Resource.Id.final_entradas)?.SetEnabled(true);
+            btnGuardar.Enabled = true;
+            _activity.DisableNavigationItems(
+                Resource.Id.navigation_inventario,
+                Resource.Id.navigation_salidas,
+                Resource.Id.navigation_entradas);
+        }
+        public async Task<int> InsertarEntradaAsyncOG(string tipoMovimiento, string usuario, string entProveedor, string entRancho, string entTabla, string entStatus)
         {
             IdConse = -1;
 
             const string query = @"
                 INSERT INTO [dbo].[Tb_RFID_Mstr]
-                    (TipoMov, FechaMov, Usuario, Prov_Clave, Ran_Clave, Tab_Clave, Mstr_Status)
+                    (TipoMov, FechaMov, Usuario, Prov_Clave, Ran_Clave, Tab_Clave, Mstr_Status )
                 VALUES
                     (@TipoMov, GETDATE(), @Usuario, @Prov_Clave, @Ran_Clave, @Tab_Clave, @Mstr_Status);
                 SELECT SCOPE_IDENTITY();";
@@ -445,6 +648,11 @@ namespace RFIDTrackBin.fragment
                 });
 
                 IdConse = newId;
+
+                // ISSUE 2: Persistir la sesión activa para sobrevivir Home → regreso
+                GuardarSesionEntrada();
+                Log.Debug(TAG, $"Entrada insertada en BD: ID={IdConse}");
+
                 Toast.MakeText(Activity, "Inicio De Entrada...", ToastLength.Short).Show();
                 sprProveedor.Enabled = false;
                 sprRancho.Enabled = false;
@@ -459,8 +667,398 @@ namespace RFIDTrackBin.fragment
         }
         #endregion
 
+        #region INICIAR ENTRADA
+        /// <summary>
+        /// Wrapper que espera el resultado de InsertarEntradaAsync antes de actualizar la UI.
+        /// Fix Bug B: la versión anterior usaba fire-and-forget, dejando la UI en estado
+        /// "en curso" aunque el INSERT hubiera fallado (IdConse = -1).
+        /// </summary>
+        private async Task IniciarEntradaAsync()
+        {
+            int id = await InsertarEntradaAsync(tipoMovimiento,
+                ((MainActivity)Activity).usuario,
+                prov_clave,
+                rch_clave,
+                tbl_clave,
+                "A",
+                int.Parse(_activity.idUnidadNegocio),
+                selectedFleteId.HasValue && selectedFleteId.Value > 0 ? selectedFleteId : null);
+
+            if (id <= 0) return; // InsertarEntradaAsync ya mostró el diálogo de error
+
+            _menu?.FindItem(Resource.Id.inicio_entradas)?.SetEnabled(false);
+            _menu?.FindItem(Resource.Id.final_entradas)?.SetEnabled(true);
+            btnGuardar.Enabled = true;
+            _activity.DisableNavigationItems(
+                Resource.Id.navigation_inventario,
+                Resource.Id.navigation_salidas,
+                Resource.Id.navigation_entradas);
+        }
+
+        /// <summary>
+        /// Inserta un nuevo registro maestro de movimiento (entrada) en Tb_RFID_Mstr.
+        /// Resuelve las claves foráneas (FK) a partir de los códigos de proveedor, rancho y tabla.
+        /// </summary>
+        public async Task<int> InsertarEntradaAsync(
+            string tipoMovimiento, string usuario,
+            string entProveedor, string entRancho, string entTabla, string entStatus, int idUnidadNegocio, int? idFlete = null)
+        {
+            IdConse = -1;
+
+            // Query actualizado según estructura de tabla Tb_RFID_Mstr
+            // Se insertan: campos base + FKs resueltas desde catálogos
+            const string query = @"
+        INSERT INTO [dbo].[Tb_RFID_Mstr]
+            (TipoMov, 
+             FechaMov, 
+             Usuario, 
+             Prov_Clave, 
+             Ran_Clave, 
+             Tab_Clave, 
+             Mstr_Status,
+             IdProveedorFK,
+             IdRanchoFK,
+             IdTablaFK,
+             EsTransferenciaInterna,
+             id_flete)
+        VALUES
+            (@TipoMov, 
+             GETDATE(), 
+             @Usuario, 
+             @Prov_Clave, 
+             @Ran_Clave, 
+             @Tab_Clave, 
+             @Mstr_Status,
+             (SELECT TOP 1 IdProveedor FROM Tb_RFID_Proveedores WHERE Prov_Clave = @Prov_Clave AND IdUnidadNegocio = @IdUnidadNegocio),
+             (SELECT TOP 1 IdRancho FROM Tb_RFID_Ranchos WHERE Ran_Clave = @Ran_Clave AND IdUnidadNegocio = @IdUnidadNegocio),
+             (SELECT TOP 1 IdTabla FROM Tb_RFID_Tablas WHERE Tab_Clave = @Tab_Clave AND IdRancho = (SELECT TOP 1 IdRancho FROM Tb_RFID_Ranchos WHERE Ran_Clave = @Ran_Clave AND IdUnidadNegocio = @IdUnidadNegocio)),
+             0,
+             @id_flete);
+        SELECT SCOPE_IDENTITY();";
+
+            try
+            {
+                int newId = await Task.Run(() =>
+                {
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    using SqlCommand cmd = new SqlCommand(query, conn);
+
+                    // Parámetros de entrada
+                    cmd.Parameters.AddWithValue("@TipoMov", tipoMovimiento ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Usuario", usuario ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Prov_Clave", entProveedor ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Ran_Clave", entRancho ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Tab_Clave", entTabla ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@Mstr_Status", entStatus ?? (object)DBNull.Value);
+                    cmd.Parameters.AddWithValue("@IdUnidadNegocio", idUnidadNegocio);
+                    // Parámetro opcional - Flete
+
+                    cmd.Parameters.AddWithValue("@id_flete", idFlete.HasValue && idFlete.Value > 0 ? (object)idFlete.Value : DBNull.Value);
+
+                    conn.Open();
+                    object result = cmd.ExecuteScalar();
+
+                    return (result != null && result != DBNull.Value && int.TryParse(result.ToString(), out int id)) ? id : -1;
+                });
+
+                IdConse = newId;
+
+                if (IdConse > 0)
+                {
+                    // ISSUE 2: Persistir la sesión activa para sobrevivir Home → regreso
+                    GuardarSesionEntrada();
+                    Log.Debug(TAG, $"Entrada insertada en BD: ID={IdConse}, Prov={entProveedor}, Ran={entRancho}, Tab={entTabla}");
+
+                    Toast.MakeText(Activity, "Inicio De Entrada...", ToastLength.Short).Show();
+
+                    // Deshabilitar controles de selección
+                    sprProveedor.Enabled = false;
+                    sprRancho.Enabled = false;
+                    sprTabla.Enabled = false;
+                }
+                else
+                {
+                    MainActivity.ShowDialog("Error al iniciar entrada", "No se pudo obtener el ID de la entrada creada.");
+                }
+            }
+            catch (SqlException sqlEx)
+            {
+                Log.Error(TAG, $"Error SQL al insertar entrada: {sqlEx.Message}, Number: {sqlEx.Number}");
+
+                // Mensaje específico para errores de FK
+                if (sqlEx.Number == 547) // Foreign key constraint violation
+                {
+                    MainActivity.ShowDialog("Error de validación",
+                        "El proveedor, rancho o tabla seleccionado no existe en el catálogo. Verifique los datos.");
+                }
+                else
+                {
+                    MainActivity.ShowDialog("Error SQL al iniciar entrada en Base de Datos:", sqlEx.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error general al insertar entrada: {ex.Message}");
+                MainActivity.ShowDialog("Error al iniciar entrada en Base de Datos:", ex.Message);
+            }
+
+            return IdConse;
+        }
+        #endregion
+
+        // ─── ISSUE 2: PERSISTENCIA DE SESIÓN DE ENTRADA ──────────────────────────
+        // Patrón idéntico al de InventarioFragment. Guarda el estado en SharedPreferences
+        // para que al regresar desde Home se restaure: IdConse, spinners y estado de menú.
+        // Clave de archivo "rfid_entradas_prefs" — no colisiona con "rfid_salidas_prefs".
+
+        #region GESTION DE ENTRADAS PERSISTENTES
+        private void MostrarDialogoEntradaPendiente()
+        {
+            var prefs = _activity.GetSharedPreferences(PREFS_ENTRADAS, FileCreationMode.Private);
+            int idPendiente = prefs.GetInt(PREF_E_ID, 0);
+            string provPendiente = prefs.GetString(PREF_E_PROV, "");
+            string ranchoPendiente = prefs.GetString(PREF_E_RANCHO, "");
+            string tablaPendiente = prefs.GetString(PREF_E_TABLA, "");
+
+            // Fix: resolver nombres legibles desde la BD antes de mostrar el diálogo
+            string nombreProv = ObtenerNombreProveedor(provPendiente) ?? provPendiente;
+            string nombreRancho = ObtenerNombreRancho(ranchoPendiente) ?? ranchoPendiente;
+            string nombreTabla = ObtenerNombreTabla(tablaPendiente) ?? tablaPendiente;
+
+            string mensaje = $"Tiene una entrada sin finalizar:\n\n" +
+                             $"ID: {idPendiente}\n" +
+                             $"Proveedor: {nombreProv}\n" +
+                             $"Rancho: {nombreRancho}\n" +
+                             $"Tabla: {nombreTabla}";
+
+            new AlertDialog.Builder(_activity)
+                .SetTitle("Entrada Pendiente")
+                .SetMessage(mensaje)
+                .SetPositiveButton("Continuar", async (s, e) =>
+                {
+                    await RestaurarSesionEntradaAsync();
+                })
+                .SetNegativeButton("Cerrar Ahora", async (s, e) =>
+                {
+                    await CerrarEntradaHuerfanaAsync(idPendiente);
+                    LimpiarSesionEntrada();
+                    await LoadProveedorAsync(vwEntradas, Convert.ToInt32(_activity.idUnidadNegocio));
+                })
+                .SetCancelable(false)
+                .Show();
+        }
+
+        /// <summary>Obtiene el NombreProveedor a partir de su Prov_Clave para mostrar en el diálogo.</summary>
+        private string ObtenerNombreProveedor(string provClave)
+        {
+            if (string.IsNullOrEmpty(provClave)) return null;
+            try
+            {
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                conn.Open();
+                using SqlCommand cmd = new SqlCommand(
+                    "SELECT TOP 1 NombreProveedor FROM Tb_RFID_Proveedores WHERE Prov_Clave = @c AND IdUnidadNegocio = @u", conn);
+                cmd.Parameters.AddWithValue("@c", provClave);
+                cmd.Parameters.AddWithValue("@u", Convert.ToInt32(_activity.idUnidadNegocio));
+                return cmd.ExecuteScalar()?.ToString();
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Obtiene el NombreRancho a partir de su Ran_Clave para mostrar en el diálogo.</summary>
+        private string ObtenerNombreRancho(string ranClave)
+        {
+            if (string.IsNullOrEmpty(ranClave)) return null;
+            try
+            {
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                conn.Open();
+                using SqlCommand cmd = new SqlCommand(
+                    @"SELECT TOP 1 r.NombreRancho 
+                      FROM Tb_RFID_Ranchos r
+                      INNER JOIN Tb_RFID_Proveedores p ON r.IdProveedor = p.IdProveedor
+                      WHERE r.Ran_Clave = @c AND p.IdUnidadNegocio = @u", conn);
+                cmd.Parameters.AddWithValue("@c", ranClave);
+                cmd.Parameters.AddWithValue("@u", Convert.ToInt32(_activity.idUnidadNegocio));
+                return cmd.ExecuteScalar()?.ToString();
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Obtiene el NombreTabla a partir de su Tab_Clave para mostrar en el diálogo.</summary>
+        private string ObtenerNombreTabla(string tabClave)
+        {
+            if (string.IsNullOrEmpty(tabClave)) return null;
+            try
+            {
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                conn.Open();
+                using SqlCommand cmd = new SqlCommand(
+                    "SELECT TOP 1 NombreTabla FROM Tb_RFID_Tablas WHERE Tab_Clave = @c", conn);
+                cmd.Parameters.AddWithValue("@c", tabClave);
+                return cmd.ExecuteScalar()?.ToString();
+            }
+            catch { return null; }
+        }
+        private void GuardarSesionEntrada()
+        {
+            if (IdConse <= 0) return;
+            var editor = _activity.GetSharedPreferences(PREFS_ENTRADAS, FileCreationMode.Private).Edit();
+            editor.PutInt(PREF_E_ID, IdConse);
+            editor.PutString(PREF_E_PROV, prov_clave ?? "");
+            editor.PutString(PREF_E_RANCHO, rch_clave ?? "");
+            editor.PutString(PREF_E_TABLA, tbl_clave ?? "");
+            editor.PutBoolean(PREF_E_ACTIVA, true);
+            editor.PutString(PREF_E_FLETE_ID, selectedFleteId.HasValue && selectedFleteId.Value > 0 ? selectedFleteId.Value.ToString() : "");
+            editor.Apply();
+            Log.Debug(TAG, $"Entrada guardada en prefs: ID={IdConse}");
+        }
+
+        private void LimpiarSesionEntrada()
+        {
+            _activity.GetSharedPreferences(PREFS_ENTRADAS, FileCreationMode.Private).Edit().Clear().Apply();
+            Log.Debug(TAG, "Sesión de entrada limpiada en prefs");
+        }
+        private async Task RestaurarSesionEntradaAsync()
+        {
+            var prefs = _activity.GetSharedPreferences(PREFS_ENTRADAS, FileCreationMode.Private);
+            if (!prefs.GetBoolean(PREF_E_ACTIVA, false)) return;
+
+            int savedId = prefs.GetInt(PREF_E_ID, -1);
+            string savedProv = prefs.GetString(PREF_E_PROV, "");
+            string savedRancho = prefs.GetString(PREF_E_RANCHO, "");
+            string savedTabla = prefs.GetString(PREF_E_TABLA, "");
+            string savedIdFlete = prefs.GetString(PREF_E_FLETE_ID, "");
+
+            if (savedId <= 0) { LimpiarSesionEntrada(); return; }
+
+            // Verificar que la entrada sigue abierta en BD
+            bool sigueAbierta = await Task.Run(() =>
+            {
+                try
+                {
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    const string sql = "SELECT COUNT(1) FROM Tb_RFID_Mstr WHERE IdConse=@id AND Mstr_Status='A'";
+                    using SqlCommand cmd = new SqlCommand(sql, conn);
+                    cmd.Parameters.AddWithValue("@id", savedId);
+                    conn.Open();
+                    return Convert.ToInt32(cmd.ExecuteScalar()) > 0;
+                }
+                catch { return false; }
+            });
+
+            if (!sigueAbierta) { LimpiarSesionEntrada(); return; }
+
+            // Fix Bug D: restaurar con flujo propio — no usar ActualizarSpinnersDesdeFletesAsync
+            // porque ese método deja la UI en estado "pre-inicio" (spinners activos, guardar inactivo),
+            // mientras que aquí la entrada YA está iniciada en BD.
+            try
+            {
+                _isLoadingFlete = true;
+
+                Spinner spinnerProv = vwEntradas.FindViewById<Spinner>(Resource.Id.sprProveedor);
+                Spinner spinnerRancho = vwEntradas.FindViewById<Spinner>(Resource.Id.sprRancho);
+                Spinner spinnerTabla = vwEntradas.FindViewById<Spinner>(Resource.Id.sprTabla);
+
+                spinnerProv.ItemSelected -= sprProveedor_ItemSelected;
+                spinnerRancho.ItemSelected -= sprRancho_ItemSelected;
+                spinnerTabla.ItemSelected -= sprTabla_ItemSelected;
+
+                // Cargar y seleccionar cada spinner
+                await LoadProveedorAsync(vwEntradas, Convert.ToInt32(_activity.idUnidadNegocio));
+                int posProveedor = EncontrarPosicionEnDataTable(vwProveedor, "Prov_Clave", savedProv);
+                if (posProveedor <= 0) throw new Exception($"Proveedor '{savedProv}' no encontrado al restaurar.");
+                spinnerProv.SetSelection(posProveedor);
+                int idProveedor = Convert.ToInt32(vwProveedor.Rows[posProveedor - 1]["IdProveedor"]);
+
+                await LoadRanchosAsync(idProveedor);
+                int posRancho = EncontrarPosicionEnDataTable(vwRanchos, "Ran_Clave", savedRancho);
+                if (posRancho <= 0) throw new Exception($"Rancho '{savedRancho}' no encontrado al restaurar.");
+                spinnerRancho.SetSelection(posRancho);
+                int idRancho = Convert.ToInt32(vwRanchos.Rows[posRancho - 1]["IdRancho"]);
+
+                await LoadTablaAsync(idRancho);
+                int posTabla = EncontrarPosicionEnDataTable(vwTablas, "Tab_Clave", savedTabla);
+                if (posTabla <= 0) throw new Exception($"Tabla '{savedTabla}' no encontrada al restaurar.");
+                spinnerTabla.SetSelection(posTabla);
+
+                // Restaurar variables de estado
+                IdConse = savedId;
+                prov_clave = vwProveedor.Rows[posProveedor - 1]["Prov_Clave"].ToString().Trim();
+                rch_clave = vwRanchos.Rows[posRancho - 1]["Ran_Clave"].ToString().Trim();
+                tbl_clave = vwTablas.Rows[posTabla - 1]["Tab_Clave"].ToString().Trim();
+                tbl_id = Convert.ToInt32(vwTablas.Rows[posTabla - 1]["IdTabla"]);
+                tbl_nombre = vwTablas.Rows[posTabla - 1]["NombreTabla"].ToString().Trim();
+                selectedFleteId = int.TryParse(savedIdFlete, out int fleteId) && fleteId > 0 ? fleteId : (int?)null;
+
+                // UI: entrada ya en curso → bloquear spinners, habilitar guardar
+                spinnerProv.Enabled = false;
+                spinnerRancho.Enabled = false;
+                spinnerTabla.Enabled = false;
+                btnGuardar.Enabled = true;
+
+                _menu?.FindItem(Resource.Id.inicio_entradas)?.SetEnabled(false);
+                _menu?.FindItem(Resource.Id.final_entradas)?.SetEnabled(true);
+
+                _activity.DisableNavigationItems(
+                    Resource.Id.navigation_inventario,
+                    Resource.Id.navigation_salidas,
+                    Resource.Id.navigation_entradas);
+
+                Log.Debug(TAG, $"Sesión de entrada restaurada: ID={IdConse}");
+                Toast.MakeText(_activity, $"Entrada #{IdConse} en curso", ToastLength.Short).Show();
+
+                // Reconectar handlers
+                spinnerProv.ItemSelected += sprProveedor_ItemSelected;
+                spinnerRancho.ItemSelected += sprRancho_ItemSelected;
+                spinnerTabla.ItemSelected += sprTabla_ItemSelected;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error al restaurar entrada: {ex.Message}");
+                Toast.MakeText(_activity, "Error al restaurar la entrada. Se cancelará la sesión.", ToastLength.Long).Show();
+                LimpiarSesionEntrada();
+            }
+            finally
+            {
+                new Android.OS.Handler(Android.OS.Looper.MainLooper).PostDelayed(
+                    () => _isLoadingFlete = false, 200);
+            }
+        }
+
+        private async Task CerrarEntradaHuerfanaAsync(int idEntrada)
+        {
+            try
+            {
+                int filas = await Task.Run(() =>
+                {
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    conn.Open();
+                    // Aquí debes definir qué significa "cerrar" una entrada.
+                    // Puede ser actualizar un campo de estado o simplemente eliminar registros temporales.
+                    // Ajusta según tu lógica de negocio.
+                    const string query = @"UPDATE Tb_RFID_Mstr 
+                                   SET Mstr_Status = 'C'  -- 'C' = Cancelado/Cerrado
+                                   WHERE IdConse = @Id AND Mstr_Status = 'A'";
+                    using SqlCommand cmd = new SqlCommand(query, conn);
+                    cmd.Parameters.AddWithValue("@Id", idEntrada);
+                    return cmd.ExecuteNonQuery();
+                });
+
+                if (filas > 0)
+                    Toast.MakeText(_activity, $"Entrada #{idEntrada} cerrada", ToastLength.Short).Show();
+                else
+                    Toast.MakeText(_activity, $"La entrada #{idEntrada} ya estaba cerrada", ToastLength.Short).Show();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error al cerrar entrada huérfana: {ex.Message}");
+                Toast.MakeText(_activity, "No se pudo cerrar la entrada pendiente", ToastLength.Long).Show();
+            }
+        }
+        #endregion
+
         #region FINALIZAR ENTRADA
-        // FIX #4: Versión async
         public async Task ActualizarHoraCierreAsync(int idConse)
         {
             const string query = @"
@@ -490,7 +1088,6 @@ namespace RFIDTrackBin.fragment
             }
         }
 
-        // FIX #4: Versión async
         public async Task UpdateFechaUltimoMovimientoAsync(int idConseInv)
         {
             const string query = @"
@@ -557,7 +1154,6 @@ namespace RFIDTrackBin.fragment
         {
             Log.Debug(TAG, "OnPause - Deteniendo inventario");
 
-            // FIX #5: Eliminado Thread.Sleep que bloqueaba el UI thread
             try
             {
                 if (_activity?.baseReader?.Action == ActionState.Inventory6c)
@@ -620,7 +1216,6 @@ namespace RFIDTrackBin.fragment
         #region RFID EVENTOS
         public void OnNotificationState(NotificationState state, Java.Lang.Object @params) { }
 
-        // FIX #1: _isInventoryInProgress se resetea cuando el inventario termina
         public void OnReaderActionChanged(BaseReader reader, ResultCode retCode, ActionState state, Java.Lang.Object @params)
         {
             if (state == ActionState.Stop)
@@ -746,7 +1341,6 @@ namespace RFIDTrackBin.fragment
                 if (_isDisposed || tagEPCList == null) return;
                 if (tagEPCList.Any(t => t.EPC == tag)) return;
 
-                // FIX #8: validaEPC ahora usa HashSet O(1)
                 if (validaEPC(tag))
                 {
                     PlayBeepSound();
@@ -770,6 +1364,7 @@ namespace RFIDTrackBin.fragment
 
         private void FindViews(View view)
         {
+            vwEntradas = view;
             btnGuardar = view.FindViewById<Button>(Resource.Id.btnGuardar);
             connectedState = view.FindViewById<TextView>(Resource.Id.txtConnectedState);
             totalCajasLeidas = view.FindViewById<TextView>(Resource.Id.txtNumTotalCajas);
@@ -780,7 +1375,7 @@ namespace RFIDTrackBin.fragment
             gvObject = view.FindViewById<GridView>(Resource.Id.gvleido);
         }
 
-        #region SPINNERS — todos async (FIX #4)
+        #region SPINNERS
         private async Task LoadProveedorAsync(View view, int idUnidadNegocio)
         {
             try
@@ -790,7 +1385,7 @@ namespace RFIDTrackBin.fragment
                 DataTable dt = await Task.Run(() =>
                 {
                     const string sql = @"
-                        SELECT IdProveedor, NombreProveedor
+                        SELECT IdProveedor, Prov_Clave, NombreProveedor
                         FROM Tb_RFID_Proveedores
                         WHERE Activo = 1
                           AND IdUnidadNegocio = @idUnidadNegocio
@@ -828,13 +1423,21 @@ namespace RFIDTrackBin.fragment
 
         private void sprProveedor_ItemSelected(object sender, AdapterView.ItemSelectedEventArgs e)
         {
-            if (e.Position == 0) return;
-
+            if (_isLoadingFlete) return;
+            if (e.Position == 0)
+            {
+                prov_clave = "";
+                rch_clave = "";
+                tbl_clave = "";
+                return;
+            }
+            prov_clave = vwProveedor.Rows[e.Position - 1]["Prov_Clave"].ToString().Trim();
+            rch_clave = "";
+            tbl_clave = "";
             int idProveedor = Convert.ToInt32(vwProveedor.Rows[e.Position - 1]["IdProveedor"]);
-
-            // FIX #4: carga en background
             _ = LoadRanchosAsync(idProveedor);
         }
+
 
         private async Task LoadRanchosAsync(int idProveedor)
         {
@@ -843,14 +1446,14 @@ namespace RFIDTrackBin.fragment
                 DataTable dt = await Task.Run(() =>
                 {
                     const string sql = @"
-                        SELECT IdRancho, NombreRancho
-                        FROM Tb_RFID_Ranchos
-                        WHERE IdProveedor = @IdProveedor AND Activo = 1
-                        ORDER BY NombreRancho";
+                SELECT IdRancho, Ran_Clave, NombreRancho
+                FROM Tb_RFID_Ranchos
+                WHERE IdProveedor = @idProveedor AND Activo = 1
+                ORDER BY NombreRancho";
 
                     using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
                     using SqlCommand cmd = new SqlCommand(sql, conn);
-                    cmd.Parameters.AddWithValue("@IdProveedor", idProveedor);
+                    cmd.Parameters.AddWithValue("@idProveedor", idProveedor);
                     using SqlDataAdapter da = new SqlDataAdapter(cmd);
                     var table = new DataTable("vwRanchos");
                     da.Fill(table);
@@ -880,27 +1483,34 @@ namespace RFIDTrackBin.fragment
 
         private void sprRancho_ItemSelected(object sender, AdapterView.ItemSelectedEventArgs e)
         {
-            if (e.Position == 0) return;
-
+            if (_isLoadingFlete) return;
+            if (e.Position == 0)
+            {
+                rch_clave = "";
+                tbl_clave = "";
+                return;
+            }
+            rch_clave = vwRanchos.Rows[e.Position - 1]["Ran_Clave"].ToString().Trim();
+            tbl_clave = "";
             int idRancho = Convert.ToInt32(vwRanchos.Rows[e.Position - 1]["IdRancho"]);
-            _ = LoadTablasAsync(idRancho);
+            _ = LoadTablaAsync(idRancho);
         }
 
-        private async Task LoadTablasAsync(int idRancho)
+        private async Task LoadTablaAsync(int idRancho)
         {
             try
             {
                 DataTable dt = await Task.Run(() =>
                 {
                     const string sql = @"
-                        SELECT IdTabla, NombreTabla
-                        FROM Tb_RFID_Tablas
-                        WHERE IdRancho = @IdRancho AND Activo = 1
-                        ORDER BY NombreTabla";
+                SELECT IdTabla, Tab_Clave, NombreTabla
+                FROM Tb_RFID_Tablas
+                WHERE IdRancho = @idRancho AND Activo = 1
+                ORDER BY NombreTabla";
 
                     using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
                     using SqlCommand cmd = new SqlCommand(sql, conn);
-                    cmd.Parameters.AddWithValue("@IdRancho", idRancho);
+                    cmd.Parameters.AddWithValue("@idRancho", idRancho);
                     using SqlDataAdapter da = new SqlDataAdapter(cmd);
                     var table = new DataTable("vwTablas");
                     da.Fill(table);
@@ -928,15 +1538,74 @@ namespace RFIDTrackBin.fragment
             }
         }
 
+        private async Task LoadTablasAsync(string provClave, string ranClave)
+        {
+            try
+            {
+                using (SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion))
+                {
+                    await conn.OpenAsync();
+
+                    string query = @"
+                SELECT t.IdTabla, t.Tab_Clave, t.NombreTabla
+                FROM Tb_RFID_Tablas t
+                WHERE t.IdRancho =
+                (
+                    SELECT r.IdRancho
+                    FROM Tb_RFID_Ranchos r
+                    WHERE r.Ran_Clave = @RanClave
+                    AND r.IdProveedor =
+                    (
+                        SELECT p.IdProveedor
+                        FROM Tb_RFID_Proveedores p
+                        WHERE p.Prov_Clave = @ProvClave
+                    )
+                )
+                ORDER BY t.NombreTabla";
+
+                    using (SqlCommand cmd = new SqlCommand(query, conn))
+                    {
+                        cmd.Parameters.AddWithValue("@ProvClave", provClave);
+                        cmd.Parameters.AddWithValue("@RanClave", ranClave);
+
+                        SqlDataAdapter da = new SqlDataAdapter(cmd);
+
+                        vwTablas = new DataTable();
+                        da.Fill(vwTablas);
+                    }
+                }
+
+                Spinner spinner = vwEntradas.FindViewById<Spinner>(Resource.Id.sprTabla);
+
+                var adapter = new ArrayAdapter<string>(
+                    _activity,
+                    Android.Resource.Layout.SimpleSpinnerItem,
+                    vwTablas.AsEnumerable()
+                        .Select(r => r["NombreTabla"].ToString())
+                        .ToList());
+
+                adapter.SetDropDownViewResource(Android.Resource.Layout.SimpleSpinnerDropDownItem);
+
+                spinner.Adapter = adapter;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"LoadTablasAsync: {ex.Message}");
+            }
+        }
+        private int tbl_id;
         private void sprTabla_ItemSelected(object sender, AdapterView.ItemSelectedEventArgs e)
         {
-            if (e.Position == 0) return;
+            if (_isLoadingFlete) return;
+            if (e.Position == 0)
+            {
+                tbl_clave = "";
+                return;
+            }
+            tbl_id = Convert.ToInt32(vwTablas.Rows[e.Position - 1]["IdTabla"]);
+            tbl_nombre = vwTablas.Rows[e.Position - 1]["NombreTabla"].ToString().Trim();
+            tbl_clave = vwTablas.Rows[e.Position - 1]["Tab_Clave"].ToString().Trim();
 
-            var selectedItem = ((Spinner)sender).GetItemAtPosition(e.Position)?.ToString();
-            if (string.IsNullOrEmpty(selectedItem)) return;
-
-            tbl_nombre = selectedItem;
-            tbl_clave = getTbl_Clave(tbl_nombre);
             _menu?.FindItem(Resource.Id.inicio_entradas)?.SetEnabled(true);
         }
 
@@ -952,8 +1621,6 @@ namespace RFIDTrackBin.fragment
         {
             btnGuardar.Click += async (s, e) =>
             {
-                // FIX: Eliminada la llamada a ConnectTask en cada guardado.
-                //      Solo verificar si el lector está disponible.
                 if (!TryAssertReader())
                 {
                     Log.Warn(TAG, "No se pudo validar el lector.");
@@ -973,7 +1640,9 @@ namespace RFIDTrackBin.fragment
 
                 try
                 {
-                    // FIX #4: INSERT en background thread
+                    // FIX #4: INSERT en background
+                    List<TagLeido> snapshot = tagEPCList.ToList();
+
                     registrosInsertados = await Task.Run(() =>
                     {
                         int insertados = 0;
@@ -994,13 +1663,34 @@ namespace RFIDTrackBin.fragment
                         cmd.Parameters.Add(new SqlParameter("@IdClaveTag", SqlDbType.VarChar));
                         cmd.Parameters.Add(new SqlParameter("@IdConseInv", SqlDbType.Decimal)).Value = IdConse;
 
-                        foreach (var tag in tagEPCList)
+                        foreach (var tag in snapshot)
                         {
                             cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
                             insertados += cmd.ExecuteNonQuery();
                         }
                         return insertados;
                     });
+
+                    if (registrosInsertados > 0)
+                    {
+                        if (sprProveedor.SelectedItemPosition <= 0)
+                        {
+                            MainActivity.ShowToast("Seleccione un Proveedor.");
+                            return;
+                        }
+                        if (sprRancho.SelectedItemPosition <= 0)
+                        {
+                            MainActivity.ShowToast("Seleccione un Rancho.");
+                            return;
+                        }
+                        if (sprTabla.SelectedItemPosition <= 0)
+                        {
+                            MainActivity.ShowToast("Seleccione una Tabla.");
+                            return;
+                        }
+
+                        await ActualizarCatalogoTagsAsync(snapshot, "E", _activity.usuario, null, prov_clave, rch_clave, int.Parse(_activity.idUnidadNegocio), 24, "A", selectedFleteId);
+                    }
 
                     totalAcumuladoINT += registrosInsertados;
                     txtTotalAcumulado.Text = totalAcumuladoINT.ToString();
@@ -1019,6 +1709,85 @@ namespace RFIDTrackBin.fragment
                     btnGuardar.Enabled = true;
                 }
             };
+        }
+
+        public async Task<int> ActualizarCatalogoTagsAsync(List<TagLeido> tags, string tipoMovimiento, string usuario, string invArea, string provClave, string ranClave, int? idUnidadNegocio, int? idUbicacion, string tipoUbicacion, int? idFlete)
+        {
+            if (tags == null || tags.Count == 0)
+                return 0;
+
+            const string query = @"
+    UPDATE Tb_RFID_Catalogo
+    SET
+        FechaUltimoMovimiento = @Fecha,
+        Tipo = @TipoMovimiento,
+        Usuario = @Usuario,
+
+        InvArea = CASE WHEN @TipoMovimiento = 'I' THEN @InvArea ELSE InvArea END,
+
+        Prov_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @ProvClave ELSE Prov_Clave END,
+        Ran_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @RanClave ELSE Ran_Clave END,
+
+        IdUnidadNegocioActual = @IdUnidadNegocio,
+        IdUbicacionActual = @IdUbicacion,
+        TipoUbicacion = @TipoUbicacion,
+
+        id_flete = CASE WHEN @TipoMovimiento = 'E' THEN @IdFlete ELSE id_flete END
+
+    WHERE IdClaveTag = @IdClaveTag";
+
+            try
+            {
+                return await Task.Run(() =>
+                {
+                    int actualizados = 0;
+
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    conn.Open();
+
+                    using SqlCommand cmd = new SqlCommand(query, conn);
+
+                    cmd.Parameters.Add("@Fecha", SqlDbType.DateTime);
+                    cmd.Parameters.Add("@TipoMovimiento", SqlDbType.Char);
+                    cmd.Parameters.Add("@Usuario", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@InvArea", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@ProvClave", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@RanClave", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@IdUnidadNegocio", SqlDbType.Int);
+                    cmd.Parameters.Add("@IdUbicacion", SqlDbType.Int);
+                    cmd.Parameters.Add("@TipoUbicacion", SqlDbType.Char);
+                    cmd.Parameters.Add("@IdFlete", SqlDbType.Int);
+                    cmd.Parameters.Add("@IdClaveTag", SqlDbType.VarChar);
+
+                    foreach (var tag in tags)
+                    {
+                        cmd.Parameters["@Fecha"].Value = tag.FechaLectura;
+                        cmd.Parameters["@TipoMovimiento"].Value = tipoMovimiento;
+                        cmd.Parameters["@Usuario"].Value = usuario;
+
+                        cmd.Parameters["@InvArea"].Value = invArea ?? (object)DBNull.Value;
+                        cmd.Parameters["@ProvClave"].Value = provClave ?? (object)DBNull.Value;
+                        cmd.Parameters["@RanClave"].Value = ranClave ?? (object)DBNull.Value;
+
+                        cmd.Parameters["@IdUnidadNegocio"].Value = idUnidadNegocio ?? (object)DBNull.Value;
+                        cmd.Parameters["@IdUbicacion"].Value = idUbicacion ?? (object)DBNull.Value;
+                        cmd.Parameters["@TipoUbicacion"].Value = tipoUbicacion ?? (object)DBNull.Value;
+
+                        cmd.Parameters["@IdFlete"].Value = idFlete.HasValue && idFlete.Value > 0 ? (object)idFlete.Value : DBNull.Value;
+
+                        cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
+
+                        actualizados += cmd.ExecuteNonQuery();
+                    }
+
+                    return actualizados;
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error actualizando catálogo: {ex}");
+                return -1;
+            }
         }
         #endregion
 
@@ -1113,7 +1882,12 @@ namespace RFIDTrackBin.fragment
             for (int i = 0; i < MAX_MASK; i++)
             {
                 try { _activity.baseReader.RfidUhf.SetSelectMask6cEnabled(i, false); }
-                catch (ReaderException e) { throw e; }
+                catch (ReaderException)
+                {
+                    // FIX M3: "throw;" en lugar de "throw e;" para preservar
+                    //         el stack trace original de la excepción.
+                    throw;
+                }
             }
         }
 
@@ -1222,7 +1996,6 @@ namespace RFIDTrackBin.fragment
         }
 
         #region VALIDAR TAG VS CATÁLOGO
-        // FIX #8: Búsqueda O(1) usando HashSet
         private bool validaEPC(string EPC)
         {
             if (_activity.CatalogoEPCSet == null || _activity.CatalogoEPCSet.Count == 0)
@@ -1233,5 +2006,441 @@ namespace RFIDTrackBin.fragment
             return _activity.CatalogoEPCSet.Contains(EPC.Trim());
         }
         #endregion
+
+        #region CREAR PROVEEDOR DESDE ORIGEN
+        private async Task<bool> CrearProveedorDesdeOrigen(string provClave, int? unidadOrigen = 3)
+        {
+            try
+            {
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                await conn.OpenAsync();
+
+                // 1. Intentar en unidad origen
+                if (unidadOrigen.HasValue)
+                {
+                    var prov = await BuscarProveedorPorClave(conn, provClave, unidadOrigen.Value);
+                    if (prov != null)
+                        return await InsertarProveedor(conn, prov, provClave);
+                }
+
+                // 2. Buscar en cualquier unidad
+                var provAny = await BuscarProveedorPorClave(conn, provClave, null);
+                if (provAny != null)
+                    return await InsertarProveedor(conn, provAny, provClave);
+
+                // 3. Crear por defecto
+                return await CrearProveedorPorDefecto(conn, provClave);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error en CrearProveedorDesdeOrigen: {ex.Message}");
+                return false;
+            }
+        }
+
+        private async Task<ProveedorOrigen> BuscarProveedorPorClave(SqlConnection conn, string provClave, int? unidad)
+        {
+            string query = @"
+        SELECT NombreProveedor, RFC, Contacto, Telefono, Email, Activo, UsuarioCreacion
+        FROM Tb_RFID_Proveedores
+        WHERE Prov_Clave = @ProvClave";
+            if (unidad.HasValue)
+                query += " AND IdUnidadNegocio = @Unidad";
+
+            using SqlCommand cmd = new SqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@ProvClave", provClave);
+            if (unidad.HasValue)
+                cmd.Parameters.AddWithValue("@Unidad", unidad.Value);
+
+            using SqlDataReader reader = await cmd.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                return new ProveedorOrigen
+                {
+                    NombreProveedor = reader["NombreProveedor"].ToString(),
+                    RFC = reader["RFC"]?.ToString(),
+                    Contacto = reader["Contacto"]?.ToString(),
+                    Telefono = reader["Telefono"]?.ToString(),
+                    Email = reader["Email"]?.ToString(),
+                    Activo = Convert.ToBoolean(reader["Activo"]),
+                    UsuarioCreacion = reader["UsuarioCreacion"]?.ToString()
+                };
+            }
+            return null;
+        }
+
+        private async Task<bool> InsertarProveedor(SqlConnection conn, ProveedorOrigen prov, string provClave)
+        {
+            string insert = @"
+        INSERT INTO Tb_RFID_Proveedores 
+            (Prov_Clave, NombreProveedor, RFC, IdUnidadNegocio, Contacto, Telefono, Email, Activo, FechaCreacion, UsuarioCreacion)
+        SELECT 
+            @ProvClave, @NombreProveedor, @RFC, @IdUnidadNegocio, @Contacto, @Telefono, @Email, @Activo, GETDATE(), @UsuarioCreacion
+        WHERE NOT EXISTS (
+            SELECT 1 FROM Tb_RFID_Proveedores 
+            WHERE Prov_Clave = @ProvClave AND IdUnidadNegocio = @IdUnidadNegocio
+        )";
+
+            using SqlCommand cmd = new SqlCommand(insert, conn);
+            cmd.Parameters.AddWithValue("@ProvClave", provClave);
+            cmd.Parameters.AddWithValue("@NombreProveedor", prov.NombreProveedor);
+            cmd.Parameters.AddWithValue("@RFC", prov.RFC ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@IdUnidadNegocio", Convert.ToInt32(_activity.idUnidadNegocio));
+            cmd.Parameters.AddWithValue("@Contacto", prov.Contacto ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@Telefono", prov.Telefono ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@Email", prov.Email ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@Activo", prov.Activo);
+            cmd.Parameters.AddWithValue("@UsuarioCreacion", prov.UsuarioCreacion ?? (object)DBNull.Value);
+
+            await cmd.ExecuteNonQueryAsync();
+            return true; // tanto inserción nueva como registro ya existente son éxito
+        }
+
+        private async Task<bool> CrearProveedorPorDefecto(SqlConnection conn, string provClave)
+        {
+            string insert = @"
+        INSERT INTO Tb_RFID_Proveedores 
+            (Prov_Clave, NombreProveedor, IdUnidadNegocio, Activo, FechaCreacion, UsuarioCreacion)
+        SELECT 
+            @ProvClave, @NombreProveedor, @IdUnidadNegocio, 1, GETDATE(), NULL
+        WHERE NOT EXISTS (
+            SELECT 1 FROM Tb_RFID_Proveedores 
+            WHERE Prov_Clave = @ProvClave AND IdUnidadNegocio = @IdUnidadNegocio
+        )";
+
+            using SqlCommand cmd = new SqlCommand(insert, conn);
+            cmd.Parameters.AddWithValue("@ProvClave", provClave);
+            cmd.Parameters.AddWithValue("@NombreProveedor", provClave);
+            cmd.Parameters.AddWithValue("@IdUnidadNegocio", Convert.ToInt32(_activity.idUnidadNegocio));
+
+            await cmd.ExecuteNonQueryAsync();
+            return true;
+        }
+        #endregion
+
+        #region CREAR RANCHO DESDE ORIGEN
+        private async Task<bool> CrearRanchoDesdeOrigen(string provClave, string ranClave, string nombreRancho, int idProveedorDestino, int? unidadOrigen = 3)
+        {
+            try
+            {
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                await conn.OpenAsync();
+
+                // 1. Intentar en unidad origen
+                if (unidadOrigen.HasValue)
+                {
+                    var rancho = await BuscarRanchoPorClaves(conn, provClave, ranClave, unidadOrigen.Value);
+                    if (rancho != null)
+                        return await InsertarRancho(conn, rancho, ranClave, idProveedorDestino);
+                }
+
+                // 2. Buscar en cualquier unidad
+                var ranchoAny = await BuscarRanchoPorClaves(conn, provClave, ranClave, null);
+                if (ranchoAny != null)
+                    return await InsertarRancho(conn, ranchoAny, ranClave, idProveedorDestino);
+
+                // 3. Crear por defecto usando el nombre del flete
+                return await CrearRanchoPorDefecto(conn, ranClave, nombreRancho, idProveedorDestino);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error en CrearRanchoDesdeOrigen: {ex.Message}");
+                return false;
+            }
+        }
+
+        private async Task<RanchoOrigen> BuscarRanchoPorClaves(SqlConnection conn, string provClave, string ranClave, int? unidad)
+        {
+            string query = @"
+        SELECT r.NombreRancho, r.Latitud, r.Longitud, r.Direccion, r.Municipio, r.Estado, r.Activo, r.UsuarioCreacion
+        FROM Tb_RFID_Ranchos r
+        INNER JOIN Tb_RFID_Proveedores p ON r.IdProveedor = p.IdProveedor
+        WHERE p.Prov_Clave = @ProvClave AND r.Ran_Clave = @RanClave";
+            if (unidad.HasValue)
+                query += " AND p.IdUnidadNegocio = @Unidad";
+
+            using SqlCommand cmd = new SqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@ProvClave", provClave);
+            cmd.Parameters.AddWithValue("@RanClave", ranClave);
+            if (unidad.HasValue)
+                cmd.Parameters.AddWithValue("@Unidad", unidad.Value);
+
+            using SqlDataReader reader = await cmd.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                return new RanchoOrigen
+                {
+                    NombreRancho = reader["NombreRancho"].ToString(),
+                    Latitud = reader["Latitud"] != DBNull.Value ? Convert.ToDouble(reader["Latitud"]) : (double?)null,
+                    Longitud = reader["Longitud"] != DBNull.Value ? Convert.ToDouble(reader["Longitud"]) : (double?)null,
+                    Direccion = reader["Direccion"]?.ToString(),
+                    Municipio = reader["Municipio"]?.ToString(),
+                    Estado = reader["Estado"]?.ToString(),
+                    Activo = Convert.ToBoolean(reader["Activo"]),
+                    UsuarioCreacion = reader["UsuarioCreacion"]?.ToString()
+                };
+            }
+            return null;
+        }
+
+        private async Task<bool> InsertarRancho(SqlConnection conn, RanchoOrigen rancho, string ranClave, int idProveedorDestino)
+        {
+            string insert = @"
+        INSERT INTO Tb_RFID_Ranchos 
+            (Ran_Clave, NombreRancho, IdProveedor, Latitud, Longitud, Direccion, Municipio, Estado, Activo, IdUnidadNegocio, FechaCreacion, UsuarioCreacion)
+        SELECT 
+            @RanClave, @NombreRancho, @IdProveedor, @Latitud, @Longitud, @Direccion, @Municipio, @Estado, @Activo, @IdUnidadNegocio, GETDATE(), @UsuarioCreacion
+        WHERE NOT EXISTS (
+            SELECT 1 FROM Tb_RFID_Ranchos 
+            WHERE Ran_Clave = @RanClave AND IdProveedor = @IdProveedor
+        )";
+
+            using SqlCommand cmd = new SqlCommand(insert, conn);
+            cmd.Parameters.AddWithValue("@RanClave", ranClave);
+            cmd.Parameters.AddWithValue("@NombreRancho", rancho.NombreRancho);
+            cmd.Parameters.AddWithValue("@IdProveedor", idProveedorDestino);
+            cmd.Parameters.AddWithValue("@Latitud", rancho.Latitud ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@Longitud", rancho.Longitud ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@Direccion", rancho.Direccion ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@Municipio", rancho.Municipio ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@Estado", rancho.Estado ?? (object)DBNull.Value);
+            cmd.Parameters.AddWithValue("@Activo", rancho.Activo);
+            cmd.Parameters.AddWithValue("@IdUnidadNegocio", Convert.ToInt32(_activity.idUnidadNegocio));
+            cmd.Parameters.AddWithValue("@UsuarioCreacion", rancho.UsuarioCreacion ?? (object)DBNull.Value);
+
+            await cmd.ExecuteNonQueryAsync();
+            return true;
+        }
+
+        private async Task<bool> CrearRanchoPorDefecto(SqlConnection conn, string ranClave, string nombreRancho, int idProveedorDestino)
+        {
+            string insert = @"
+        INSERT INTO Tb_RFID_Ranchos 
+            (Ran_Clave, NombreRancho, IdProveedor, Activo, IdUnidadNegocio, FechaCreacion, UsuarioCreacion)
+        SELECT 
+            @RanClave, @NombreRancho, @IdProveedor, 1, @IdUnidadNegocio, GETDATE(), NULL
+        WHERE NOT EXISTS (
+            SELECT 1 FROM Tb_RFID_Ranchos 
+            WHERE Ran_Clave = @RanClave AND IdProveedor = @IdProveedor
+        )";
+
+            using SqlCommand cmd = new SqlCommand(insert, conn);
+            cmd.Parameters.AddWithValue("@RanClave", ranClave);
+            cmd.Parameters.AddWithValue("@NombreRancho", nombreRancho);
+            cmd.Parameters.AddWithValue("@IdProveedor", idProveedorDestino);
+            cmd.Parameters.AddWithValue("@IdUnidadNegocio", Convert.ToInt32(_activity.idUnidadNegocio));
+
+            await cmd.ExecuteNonQueryAsync();
+            return true;
+        }
+        #endregion
+
+        #region CREAR TABLA DESDE ORIGEN
+        private async Task<bool> CrearTablaDesdeOrigen(string provClave, string ranClave, string tabClave, int idRanchoDestino, int? unidadOrigen = 3)
+        {
+            try
+            {
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                await conn.OpenAsync();
+
+                // 1. Intentar en unidad origen
+                if (unidadOrigen.HasValue)
+                {
+                    var tabla = await BuscarTablaPorClaves(conn, provClave, ranClave, tabClave, unidadOrigen.Value);
+                    if (tabla != null)
+                        return await InsertarTabla(conn, tabla, tabClave, idRanchoDestino);
+                }
+
+                // 2. Buscar en cualquier unidad
+                var tablaAny = await BuscarTablaPorClaves(conn, provClave, ranClave, tabClave, null);
+                if (tablaAny != null)
+                    return await InsertarTabla(conn, tablaAny, tabClave, idRanchoDestino);
+
+                // 3. Crear por defecto
+                return await CrearTablaPorDefecto(conn, tabClave, idRanchoDestino);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error en CrearTablaDesdeOrigen: {ex.Message}");
+                return false;
+            }
+        }
+
+        private async Task<TablaOrigen> BuscarTablaPorClaves(SqlConnection conn, string provClave, string ranClave, string tabClave, int? unidad)
+        {
+            string query = @"
+        SELECT t.NombreTabla, t.Superficie, t.Activo, t.UsuarioCreacion
+        FROM Tb_RFID_Tablas t
+        INNER JOIN Tb_RFID_Ranchos r ON t.IdRancho = r.IdRancho
+        INNER JOIN Tb_RFID_Proveedores p ON r.IdProveedor = p.IdProveedor
+        WHERE p.Prov_Clave = @ProvClave AND r.Ran_Clave = @RanClave AND t.Tab_Clave = @TabClave";
+            if (unidad.HasValue)
+                query += " AND p.IdUnidadNegocio = @Unidad";
+
+            using SqlCommand cmd = new SqlCommand(query, conn);
+            cmd.Parameters.AddWithValue("@ProvClave", provClave);
+            cmd.Parameters.AddWithValue("@RanClave", ranClave);
+            cmd.Parameters.AddWithValue("@TabClave", tabClave);
+            if (unidad.HasValue)
+                cmd.Parameters.AddWithValue("@Unidad", unidad.Value);
+
+            using SqlDataReader reader = await cmd.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                return new TablaOrigen
+                {
+                    NombreTabla = reader["NombreTabla"].ToString(),
+                    Superficie = reader["Superficie"] != DBNull.Value ? Convert.ToDecimal(reader["Superficie"]) : 0,
+                    Activo = Convert.ToBoolean(reader["Activo"]),
+                    UsuarioCreacion = reader["UsuarioCreacion"]?.ToString()
+                };
+            }
+            return null;
+        }
+
+        private async Task<bool> InsertarTabla(SqlConnection conn, TablaOrigen tabla, string tabClave, int idRanchoDestino)
+        {
+            string insert = @"
+        INSERT INTO Tb_RFID_Tablas 
+            (Tab_Clave, NombreTabla, IdRancho, Superficie, Activo, FechaCreacion, UsuarioCreacion)
+        SELECT 
+            @TabClave, @NombreTabla, @IdRancho, @Superficie, @Activo, GETDATE(), @UsuarioCreacion
+        WHERE NOT EXISTS (
+            SELECT 1 FROM Tb_RFID_Tablas 
+            WHERE Tab_Clave = @TabClave AND IdRancho = @IdRancho
+        )";
+
+            using SqlCommand cmd = new SqlCommand(insert, conn);
+            cmd.Parameters.AddWithValue("@TabClave", tabClave);
+            cmd.Parameters.AddWithValue("@NombreTabla", tabla.NombreTabla);
+            cmd.Parameters.AddWithValue("@IdRancho", idRanchoDestino);
+            cmd.Parameters.AddWithValue("@Superficie", tabla.Superficie);
+            cmd.Parameters.AddWithValue("@Activo", tabla.Activo);
+            cmd.Parameters.AddWithValue("@UsuarioCreacion", tabla.UsuarioCreacion ?? (object)DBNull.Value);
+
+            await cmd.ExecuteNonQueryAsync();
+            return true;
+        }
+
+        private async Task<bool> CrearTablaPorDefecto(SqlConnection conn, string tabClave, int idRanchoDestino)
+        {
+            string insert = @"
+        INSERT INTO Tb_RFID_Tablas 
+            (Tab_Clave, NombreTabla, IdRancho, Activo, FechaCreacion, UsuarioCreacion)
+        SELECT 
+            @TabClave, @NombreTabla, @IdRancho, 1, GETDATE(), NULL
+        WHERE NOT EXISTS (
+            SELECT 1 FROM Tb_RFID_Tablas 
+            WHERE Tab_Clave = @TabClave AND IdRancho = @IdRancho
+        )";
+
+            using SqlCommand cmd = new SqlCommand(insert, conn);
+            cmd.Parameters.AddWithValue("@TabClave", tabClave);
+            cmd.Parameters.AddWithValue("@NombreTabla", tabClave);
+            cmd.Parameters.AddWithValue("@IdRancho", idRanchoDestino);
+
+            await cmd.ExecuteNonQueryAsync();
+            return true;
+        }
+        #endregion
+        private async Task<int?> VerificarProveedorExistenteActivo(string provClave, int idUnidadNegocio)
+        {
+            try
+            {
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                await conn.OpenAsync();
+                string query = "SELECT IdProveedor FROM Tb_RFID_Proveedores WHERE Prov_Clave = @ProvClave AND IdUnidadNegocio = @IdUnidadNegocio AND Activo = 1";
+                using SqlCommand cmd = new SqlCommand(query, conn);
+                cmd.Parameters.AddWithValue("@ProvClave", provClave);
+                cmd.Parameters.AddWithValue("@IdUnidadNegocio", idUnidadNegocio);
+                var result = await cmd.ExecuteScalarAsync();
+                if (result != null && result != DBNull.Value)
+                    return Convert.ToInt32(result);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"VerificarProveedorExistenteActivo error: {ex.Message}");
+                return null;
+            }
+        }
+
+        private async Task<int?> VerificarRanchoExistenteActivo(int idProveedor, string ranClave)
+        {
+            try
+            {
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                await conn.OpenAsync();
+                string query = "SELECT IdRancho FROM Tb_RFID_Ranchos WHERE IdProveedor = @IdProveedor AND Ran_Clave = @RanClave AND Activo = 1";
+                using SqlCommand cmd = new SqlCommand(query, conn);
+                cmd.Parameters.AddWithValue("@IdProveedor", idProveedor);
+                cmd.Parameters.AddWithValue("@RanClave", ranClave);
+                var result = await cmd.ExecuteScalarAsync();
+                if (result != null && result != DBNull.Value)
+                    return Convert.ToInt32(result);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"VerificarRanchoExistenteActivo error: {ex.Message}");
+                return null;
+            }
+        }
+
+        private async Task<int?> VerificarTablaExistenteIncluyendoInactivos(int idRancho, string tabClave)
+        {
+            try
+            {
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                await conn.OpenAsync();
+                string query = "SELECT IdTabla FROM Tb_RFID_Tablas WHERE IdRancho = @IdRancho AND Tab_Clave = @TabClave";
+                using SqlCommand cmd = new SqlCommand(query, conn);
+                cmd.Parameters.AddWithValue("@IdRancho", idRancho);
+                cmd.Parameters.AddWithValue("@TabClave", tabClave);
+                var result = await cmd.ExecuteScalarAsync();
+                if (result != null && result != DBNull.Value)
+                    return Convert.ToInt32(result);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"VerificarTablaExistenteIncluyendoInactivos error: {ex.Message}");
+                return null;
+            }
+        }
+        #region CLASES AUXILIARES
+        private class ProveedorOrigen
+        {
+            public string NombreProveedor { get; set; }
+            public string RFC { get; set; }
+            public string Contacto { get; set; }
+            public string Telefono { get; set; }
+            public string Email { get; set; }
+            public bool Activo { get; set; }
+            public string UsuarioCreacion { get; set; }
+        }
+
+        private class RanchoOrigen
+        {
+            public string NombreRancho { get; set; }
+            public double? Latitud { get; set; }
+            public double? Longitud { get; set; }
+            public string Direccion { get; set; }
+            public string Municipio { get; set; }
+            public string Estado { get; set; }
+            public bool Activo { get; set; }
+            public string UsuarioCreacion { get; set; }
+        }
+
+        private class TablaOrigen
+        {
+            public string NombreTabla { get; set; }
+            public decimal Superficie { get; set; }
+            public bool Activo { get; set; }
+            public string UsuarioCreacion { get; set; }
+        }
+        #endregion
+
     }
+
 }

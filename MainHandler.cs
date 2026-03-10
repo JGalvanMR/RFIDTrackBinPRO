@@ -27,6 +27,12 @@ namespace RFIDTrackBin
         {
             base.HandleMessage(msg);
 
+            // FIX MH-2: Guardia contra mensajes que llegan después de OnDestroy.
+            // Sin este check, _activity.GetFragment() arroja NullReferenceException
+            // si el mensaje estaba en cola cuando se destruyó la activity.
+            if (_activity == null || _activity.IsDestroyed || _activity.IsFinishing)
+                return;
+
             var fragmentType = (FragmentType)msg.What;
             var baseFragment = _activity.GetFragment(fragmentType);
 
@@ -59,31 +65,23 @@ namespace RFIDTrackBin
         {
             string message = bundle.GetString(ExtraName.Text);
             bool isLongDuration = bundle.GetInt(ExtraName.Number, 1) == 1;
-            Toast.MakeText(_activity.ApplicationContext, message, isLongDuration ? ToastLength.Long : ToastLength.Short).Show();
-        }
-
-        private void HandlerProcess(Bundle bundle)
-        {
-            HandlerMsg msgType = (HandlerMsg)bundle.GetInt(ExtraName.HandleMsg);
-
-            switch (msgType)
-            {
-                case HandlerMsg.Toast:
-                    string data = bundle.GetString(ExtraName.Text);
-                    bool length = (bundle.GetInt(ExtraName.Number, 1) == 1);
-                    Toast.MakeText(_activity.ApplicationContext, data, length ? ToastLength.Long : ToastLength.Short).Show();
-                    break;
-                case HandlerMsg.Dialog:
-                    ShowDialog(bundle);
-                    break;
-                    //            case HideDialog:
-                    //                hideDialog(bundle);
-                    //                break;
-            }
+            Toast.MakeText(
+                _activity.ApplicationContext,
+                message,
+                isLongDuration ? ToastLength.Long : ToastLength.Short
+            ).Show();
         }
 
         void ShowDialog(Bundle dlgData)
         {
+            // FIX MH-1: Cerrar el diálogo anterior antes de crear uno nuevo para evitar
+            // acumulación de AlertDialogs en memoria durante sesiones largas o si ShowDialog
+            // se llama repetidamente (p.ej. múltiples tags RFID sin catálogo).
+            if (alertDialog != null && alertDialog.IsShowing)
+            {
+                try { alertDialog.Dismiss(); } catch { /* ignorar si ya fue cerrado */ }
+            }
+
             InitAlertDlg();
             alertDialog.SetTitle(dlgData.GetString(ExtraName.Title));
             alertDialog.SetMessage(dlgData.GetString(ExtraName.Text));

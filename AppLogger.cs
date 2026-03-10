@@ -1,13 +1,4 @@
-﻿using Android.App;
-using Android.Content;
-using Android.OS;
-using Android.Runtime;
-using Android.Views;
-using Android.Widget;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
+﻿using System;
 using System.IO;
 
 namespace RFIDTrackBin
@@ -15,14 +6,27 @@ namespace RFIDTrackBin
     public static class AppLogger
     {
         private static readonly string LogFilePath =
-            Path.Combine(System.Environment.GetFolderPath(System.Environment.SpecialFolder.LocalApplicationData), "app_log.txt");
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "app_log.txt");
+
+        // FIX AL-1: _logLock garantiza thread-safety sobre File.AppendAllText.
+        // Log() es invocado concurrentemente desde: UI thread, callbacks del SDK
+        // RFID (hilo nativo del hardware) y múltiples Task.Run de fondo.
+        // File.AppendAllText NO es thread-safe — sin este lock dos hilos pueden
+        // corromper el archivo o lanzar IOException silenciosa (el catch la
+        // tragaba, haciendo el problema invisible en producción).
+        private static readonly object _logLock = new object();
 
         public static void Log(string message)
         {
             try
             {
                 var logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} | {message}\n";
-                File.AppendAllText(LogFilePath, logMessage);
+                lock (_logLock)
+                {
+                    File.AppendAllText(LogFilePath, logMessage);
+                }
             }
             catch
             {
