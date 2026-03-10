@@ -118,7 +118,7 @@ namespace RFIDTrackBin.fragment
         private myGVitemAdapterFP fpAdapter;
         private Android.App.AlertDialog fletesPendientesDialog;
         private AlertDialog _dialogoFletes;
-        private int selectedFleteId = -1;
+        private int? selectedFleteId = null;
         #endregion
         #region PERSISTENCIA DE ENTRADAS
         private const string PREFS_ENTRADAS = "rfid_entradas_prefs";
@@ -264,6 +264,7 @@ namespace RFIDTrackBin.fragment
             prov_clave = "";
             rch_clave = "";
             tbl_clave = "";
+            selectedFleteId = null;
 
             _activity.EnableNavigationItems(
                 Resource.Id.navigation_inventario,
@@ -676,7 +677,12 @@ namespace RFIDTrackBin.fragment
         {
             int id = await InsertarEntradaAsync(tipoMovimiento,
                 ((MainActivity)Activity).usuario,
-                prov_clave, rch_clave, tbl_clave, "A", int.Parse(_activity.idUnidadNegocio), selectedFleteId);
+                prov_clave,
+                rch_clave,
+                tbl_clave,
+                "A",
+                int.Parse(_activity.idUnidadNegocio),
+                selectedFleteId.HasValue && selectedFleteId.Value > 0 ? selectedFleteId : null);
 
             if (id <= 0) return; // InsertarEntradaAsync ya mostró el diálogo de error
 
@@ -747,7 +753,7 @@ namespace RFIDTrackBin.fragment
                     cmd.Parameters.AddWithValue("@IdUnidadNegocio", idUnidadNegocio);
                     // Parámetro opcional - Flete
 
-                    cmd.Parameters.AddWithValue("@id_flete", (object)idFlete ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@id_flete", idFlete.HasValue && idFlete.Value > 0 ? (object)idFlete.Value : DBNull.Value);
 
                     conn.Open();
                     object result = cmd.ExecuteScalar();
@@ -903,7 +909,7 @@ namespace RFIDTrackBin.fragment
             editor.PutString(PREF_E_RANCHO, rch_clave ?? "");
             editor.PutString(PREF_E_TABLA, tbl_clave ?? "");
             editor.PutBoolean(PREF_E_ACTIVA, true);
-            editor.PutString(PREF_E_FLETE_ID, selectedFleteId > 0 ? selectedFleteId.ToString() : "");
+            editor.PutString(PREF_E_FLETE_ID, selectedFleteId.HasValue && selectedFleteId.Value > 0 ? selectedFleteId.Value.ToString() : "");
             editor.Apply();
             Log.Debug(TAG, $"Entrada guardada en prefs: ID={IdConse}");
         }
@@ -983,7 +989,7 @@ namespace RFIDTrackBin.fragment
                 tbl_clave = vwTablas.Rows[posTabla - 1]["Tab_Clave"].ToString().Trim();
                 tbl_id = Convert.ToInt32(vwTablas.Rows[posTabla - 1]["IdTabla"]);
                 tbl_nombre = vwTablas.Rows[posTabla - 1]["NombreTabla"].ToString().Trim();
-                selectedFleteId = int.Parse(savedIdFlete);
+                selectedFleteId = int.TryParse(savedIdFlete, out int fleteId) && fleteId > 0 ? fleteId : (int?)null;
 
                 // UI: entrada ya en curso → bloquear spinners, habilitar guardar
                 spinnerProv.Enabled = false;
@@ -1767,7 +1773,7 @@ namespace RFIDTrackBin.fragment
                         cmd.Parameters["@IdUbicacion"].Value = idUbicacion ?? (object)DBNull.Value;
                         cmd.Parameters["@TipoUbicacion"].Value = tipoUbicacion ?? (object)DBNull.Value;
 
-                        cmd.Parameters["@IdFlete"].Value = idFlete ?? (object)DBNull.Value;
+                        cmd.Parameters["@IdFlete"].Value = idFlete.HasValue && idFlete.Value > 0 ? (object)idFlete.Value : DBNull.Value;
 
                         cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
 
