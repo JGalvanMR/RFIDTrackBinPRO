@@ -1060,27 +1060,74 @@ namespace RFIDTrackBin.fragment
 
                     registrosInsertados = await Task.Run(() =>
                     {
-                        int insertados = 0;
-                        const string query = @"
-                            INSERT INTO Tb_RFID_DetInv (IdConseInv, IdClaveInt, FechaCaptura)
-                            SELECT @IdConseInv, IdClaveInt, @FechaCaptura
-                            FROM Tb_RFID_Catalogo
-                            WHERE IdClaveTag = @IdClaveTag";
+                        // 🔹 1. Filtrar duplicados en memoria
+                        var snapshot = tagsLeidos
+                            .GroupBy(t => t.EPC)
+                            .Select(g => g.First())
+                            .ToList();
 
-                        using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
-                        conn.Open();
-                        using SqlCommand cmd = new SqlCommand(query, conn);
-                        cmd.Parameters.Add(new SqlParameter("@IdClaveTag", SqlDbType.VarChar));
-                        cmd.Parameters.Add(new SqlParameter("@FechaCaptura", SqlDbType.DateTime));
-                        cmd.Parameters.Add(new SqlParameter("@IdConseInv", SqlDbType.Decimal)).Value = IdConseInv;
+                        // 🔹 2. Crear DataTable
+                        DataTable dt = new DataTable();
+                        dt.Columns.Add("IdClaveTag", typeof(string));
+                        dt.Columns.Add("FechaCaptura", typeof(DateTime));
 
                         foreach (var tag in snapshot)
                         {
-                            cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
-                            cmd.Parameters["@FechaCaptura"].Value = tag.FechaLectura;
-                            insertados += cmd.ExecuteNonQuery();
+                            dt.Rows.Add(tag.EPC, tag.FechaLectura);
                         }
-                        return insertados;
+
+                        using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                        conn.Open();
+
+                        using SqlTransaction transaction = conn.BeginTransaction();
+
+                        try
+                        {
+                            // 🔹 3. Limpiar staging (opcional pero recomendado)
+                            using (SqlCommand cleanCmd = new SqlCommand("TRUNCATE TABLE Tb_RFID_DetInv_Staging", conn, transaction))
+                            {
+                                cleanCmd.ExecuteNonQuery();
+                            }
+
+                            // 🔹 4. Bulk insert
+                            using (SqlBulkCopy bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.Default, transaction))
+                            {
+                                bulk.DestinationTableName = "Tb_RFID_DetInv_Staging";
+
+                                bulk.ColumnMappings.Add("IdClaveTag", "IdClaveTag");
+                                bulk.ColumnMappings.Add("FechaCaptura", "FechaCaptura");
+
+                                bulk.WriteToServer(dt);
+                            }
+
+                            // 🔹 5. Insert final evitando duplicados
+                            string insertFinal = @"INSERT INTO Tb_RFID_DetInv (IdConseInv, IdClaveInt, FechaCaptura)
+                                                   SELECT DISTINCT
+                                                   @IdConseInv,
+                                                   c.IdClaveInt,
+                                                   s.FechaCaptura
+                                                   FROM Tb_RFID_DetInv_Staging s
+                                                   INNER JOIN Tb_RFID_Catalogo c ON c.IdClaveTag = s.IdClaveTag
+                                                   WHERE NOT EXISTS (
+                                                        SELECT 1
+                                                        FROM Tb_RFID_DetInv d
+                                                        WHERE d.IdConseInv = @IdConseInv
+                                                        AND d.IdClaveInt = c.IdClaveInt
+                                                    );";
+
+                            using SqlCommand cmd = new SqlCommand(insertFinal, conn, transaction);
+                            cmd.Parameters.AddWithValue("@IdConseInv", IdConseInv);
+
+                            int insertados = cmd.ExecuteNonQuery();
+
+                            transaction.Commit();
+                            return insertados;
+                        }
+                        catch
+                        {
+                            transaction.Rollback();
+                            throw;
+                        }
                     });
 
                     if (registrosInsertados > 0)
@@ -1091,7 +1138,7 @@ namespace RFIDTrackBin.fragment
                             return;
                         }
                         int indice = sprAreas.SelectedItemPosition - 1;
-                        await ActualizarCatalogoTagsAsync(snapshot, "I", _activity.usuario, sprAreas.SelectedItem?.ToString(), null, null, int.Parse(_activity.idUnidadNegocio), int.Parse(areas.Rows[indice]["IdArea"].ToString()), "A", null);
+                        await ActualizarCatalogoTagsAsync(snapshot, "I", _activity.usuario, sprAreas.SelectedItem?.ToString(), null, null, int.Parse(_activity.idUnidadNegocio), int.Parse(areas.Rows[indice]["IdArea"].ToString()), "A", null, true);
                     }
 
                     totalAcumuladoINT += registrosInsertados;
@@ -1113,7 +1160,7 @@ namespace RFIDTrackBin.fragment
             };
         }
 
-        public async Task<int> ActualizarCatalogoTagsAsync(List<TagLeido> tags, string tipoMovimiento, string usuario, string invArea, string provClave, string ranClave, int? idUnidadNegocio, int? idUbicacion, string tipoUbicacion, int? idFlete)
+        public async Task<int> ActualizarCatalogoTagsAsyncV1(List<TagLeido> tags, string tipoMovimiento, string usuario, string invArea, string provClave, string ranClave, int? idUnidadNegocio, int? idUbicacion, string tipoUbicacion, int? idFlete)
         {
             if (tags == null || tags.Count == 0)
                 return 0;
@@ -1183,6 +1230,119 @@ namespace RFIDTrackBin.fragment
                     }
 
                     return actualizados;
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error actualizando catálogo: {ex}");
+                return -1;
+            }
+        }
+        public async Task<int> ActualizarCatalogoTagsAsync(
+            List<TagLeido> tags,
+            string tipoMovimiento,
+            string usuario,
+            string invArea,
+            string provClave,
+            string ranClave,
+            int? idUnidadNegocio,
+            int? idUbicacion,
+            string tipoUbicacion,
+            int? idFlete,
+            bool modoPrueba = false)
+        {
+            if (tags == null || tags.Count == 0)
+                return 0;
+
+            const string query = @"
+UPDATE Tb_RFID_Catalogo
+SET
+    FechaUltimoMovimiento = @Fecha,
+    Tipo = @TipoMovimiento,
+    Usuario = @Usuario,
+
+    InvArea = CASE WHEN @TipoMovimiento = 'I' THEN @InvArea ELSE InvArea END,
+
+    Prov_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @ProvClave ELSE Prov_Clave END,
+    Ran_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @RanClave ELSE Ran_Clave END,
+
+    IdUnidadNegocioActual = @IdUnidadNegocio,
+    IdUbicacionActual = @IdUbicacion,
+    TipoUbicacion = @TipoUbicacion,
+
+    id_flete = CASE WHEN @TipoMovimiento = 'E' THEN @IdFlete ELSE id_flete END
+WHERE IdClaveTag = @IdClaveTag";
+
+            try
+            {
+                return await Task.Run(() =>
+                {
+                    int actualizados = 0;
+
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    conn.Open();
+
+                    using SqlTransaction transaction = conn.BeginTransaction();
+
+                    try
+                    {
+                        using SqlCommand cmd = new SqlCommand(query, conn, transaction);
+
+                        cmd.Parameters.Add("@Fecha", SqlDbType.DateTime);
+                        cmd.Parameters.Add("@TipoMovimiento", SqlDbType.Char);
+                        cmd.Parameters.Add("@Usuario", SqlDbType.VarChar);
+                        cmd.Parameters.Add("@InvArea", SqlDbType.VarChar);
+                        cmd.Parameters.Add("@ProvClave", SqlDbType.VarChar);
+                        cmd.Parameters.Add("@RanClave", SqlDbType.VarChar);
+                        cmd.Parameters.Add("@IdUnidadNegocio", SqlDbType.Int);
+                        cmd.Parameters.Add("@IdUbicacion", SqlDbType.Int);
+                        cmd.Parameters.Add("@TipoUbicacion", SqlDbType.Char);
+                        cmd.Parameters.Add("@IdFlete", SqlDbType.Int);
+                        cmd.Parameters.Add("@IdClaveTag", SqlDbType.VarChar);
+
+                        // 🔹 eliminar duplicados en memoria
+                        var snapshot = tags
+                            .GroupBy(t => t.EPC)
+                            .Select(g => g.First())
+                            .ToList();
+
+                        foreach (var tag in snapshot)
+                        {
+                            cmd.Parameters["@Fecha"].Value = tag.FechaLectura;
+                            cmd.Parameters["@TipoMovimiento"].Value = tipoMovimiento;
+                            cmd.Parameters["@Usuario"].Value = usuario;
+
+                            cmd.Parameters["@InvArea"].Value = (object?)invArea ?? DBNull.Value;
+                            cmd.Parameters["@ProvClave"].Value = (object?)provClave ?? DBNull.Value;
+                            cmd.Parameters["@RanClave"].Value = (object?)ranClave ?? DBNull.Value;
+
+                            cmd.Parameters["@IdUnidadNegocio"].Value = (object?)idUnidadNegocio ?? DBNull.Value;
+                            cmd.Parameters["@IdUbicacion"].Value = (object?)idUbicacion ?? DBNull.Value;
+                            cmd.Parameters["@TipoUbicacion"].Value = (object?)tipoUbicacion ?? DBNull.Value;
+
+                            cmd.Parameters["@IdFlete"].Value = (object?)idFlete ?? DBNull.Value;
+                            cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
+
+                            actualizados += cmd.ExecuteNonQuery();
+                        }
+
+                        if (modoPrueba)
+                        {
+                            // 🔥 NO guarda cambios
+                            transaction.Rollback();
+                        }
+                        else
+                        {
+                            transaction.Commit();
+                        }
+
+                        return actualizados;
+                    }
+                    catch
+                    {
+                        transaction.Rollback();
+                        throw;
+                    }
                 });
             }
             catch (Exception ex)
