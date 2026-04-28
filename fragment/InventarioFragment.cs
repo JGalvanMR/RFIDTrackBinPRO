@@ -1032,7 +1032,7 @@ namespace RFIDTrackBin.fragment
         #endregion
 
         #region BOTÓN GUARDAR
-        private void SetButtonClick()
+        private void SetButtonClickV1()
         {
             btnGuardarInventario.Click += async (s, e) =>
             {
@@ -1159,6 +1159,138 @@ namespace RFIDTrackBin.fragment
                 }
             };
         }
+
+        private void SetButtonClick()
+        {
+            // 🔴 Evitar múltiples suscripciones
+            btnGuardarInventario.Click -= BtnGuardarInventario_Click;
+            btnGuardarInventario.Click += BtnGuardarInventario_Click;
+        }
+
+        private async void BtnGuardarInventario_Click(object sender, EventArgs e)
+        {
+            if (!TryAssertReader())
+            {
+                Log.Warn(TAG, "No se pudo validar el lector.");
+                return;
+            }
+
+            if (tagsLeidos == null || tagsLeidos.Count == 0)
+            {
+                MainActivity.ShowToast("No hay datos para guardar.");
+                return;
+            }
+
+            loadingOverlay.Visibility = ViewStates.Visible;
+            btnGuardarInventario.Enabled = false;
+
+            int registrosInsertados = 0;
+
+            // 🔹 Snapshot sin duplicados
+            List<TagLeido> snapshot = tagsLeidos
+                .GroupBy(t => t.EPC)
+                .Select(g => g.First())
+                .ToList();
+
+            try
+            {
+                registrosInsertados = await Task.Run(() =>
+                {
+                    int insertados = 0;
+
+                    const string query = @"
+                                            INSERT INTO Tb_RFID_DetInv (IdConseInv, IdClaveInt, FechaCaptura)
+                                            SELECT 
+                                                @IdConseInv,
+                                                c.IdClaveInt,
+                                                @FechaCaptura
+                                            FROM Tb_RFID_Catalogo c
+                                            WHERE c.IdClaveTag = @IdClaveTag
+                                            AND NOT EXISTS (
+                                                SELECT 1
+                                                FROM Tb_RFID_DetInv d
+                                                WHERE d.IdConseInv = @IdConseInv
+                                                AND d.IdClaveInt = c.IdClaveInt
+                                            );";
+
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    conn.Open();
+
+                    using SqlTransaction transaction = conn.BeginTransaction();
+
+                    try
+                    {
+                        using SqlCommand cmd = new SqlCommand(query, conn, transaction);
+
+                        cmd.Parameters.Add("@IdConseInv", SqlDbType.Decimal).Value = IdConseInv;
+                        cmd.Parameters.Add("@IdClaveTag", SqlDbType.VarChar);
+                        cmd.Parameters.Add("@FechaCaptura", SqlDbType.DateTime);
+
+                        foreach (var tag in snapshot)
+                        {
+                            cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
+                            cmd.Parameters["@FechaCaptura"].Value = tag.FechaLectura;
+
+                            insertados += cmd.ExecuteNonQuery();
+                        }
+
+                        transaction.Commit();
+                        return insertados;
+                    }
+                    catch
+                    {
+                        transaction.Rollback();
+                        throw;
+                    }
+                });
+
+                // 🔹 Actualizar catálogo
+                if (registrosInsertados > 0)
+                {
+                    if (sprAreas.SelectedItemPosition <= 0)
+                    {
+                        MainActivity.ShowToast("Seleccione un área.");
+                        return;
+                    }
+
+                    int indice = sprAreas.SelectedItemPosition - 1;
+
+                    await ActualizarCatalogoTagsAsync(
+                        snapshot,
+                        "I",
+                        _activity.usuario,
+                        sprAreas.SelectedItem?.ToString(),
+                        null,
+                        null,
+                        int.Parse(_activity.idUnidadNegocio),
+                        int.Parse(areas.Rows[indice]["IdArea"].ToString()),
+                        "A",
+                        null,
+                        true // 🔥 modo prueba (cambiar a false en producción)
+                    );
+                }
+
+                totalAcumuladoINT += registrosInsertados;
+                txtTotalAcumulado.Text = totalAcumuladoINT.ToString();
+
+                MainActivity.ShowDialog(
+                    "INFORMACIÓN ALMACENADA",
+                    $"Se han guardado {registrosInsertados} registros exitosamente."
+                );
+
+                ClearGridView();
+            }
+            catch (Exception ex)
+            {
+                MainActivity.ShowToast("Error al guardar: " + ex.Message);
+            }
+            finally
+            {
+                loadingOverlay.Visibility = ViewStates.Gone;
+                btnGuardarInventario.Enabled = true;
+            }
+        }
+
 
         public async Task<int> ActualizarCatalogoTagsAsyncV1(List<TagLeido> tags, string tipoMovimiento, string usuario, string invArea, string provClave, string ranClave, int? idUnidadNegocio, int? idUbicacion, string tipoUbicacion, int? idFlete)
         {

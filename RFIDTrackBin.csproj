@@ -5,6 +5,7 @@
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <ProductVersion>8.0.30703</ProductVersion>
     <SchemaVersion>2.0</SchemaVersion>
+	  <LangVersion>Latest</LangVersion>
     <ProjectGuid>{7B79069D-E785-4334-8D1A-78C66875CDC9}</ProjectGuid>
     <ProjectTypeGuids>{EFBA0AD7-5A72-4C68-AF49-83D382785DCF};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
     <TemplateGuid>{e0dc9abc-7303-488b-8af1-61e341bd2a32}</TemplateGuid>
@@ -116,6 +117,7 @@
     <Compile Include="NfcReceiver.cs" />
     <Compile Include="Resources\Resource.designer.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="RfidDuplicateDetector.cs" />
     <Compile Include="ScanReceiver.cs" />
     <Compile Include="SpinnerTouchListener.cs" />
     <Compile Include="Utilities.cs" />
