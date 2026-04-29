@@ -1,4 +1,4 @@
-# 📦 Nombre del Módulo: RFIDTrackBin — Sistema de Rastreo de Bins por RFID
+# 📦 RFIDTrackBin — Sistema de Rastreo de Bins por RFID
 
 ---
 
