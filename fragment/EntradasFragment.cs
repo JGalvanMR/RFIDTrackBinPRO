@@ -93,7 +93,7 @@ namespace RFIDTrackBin.fragment
         int totalCajasLeidasINT = 0;
         int totalAcumuladoINT = 0;
 
-        string IdClaveTag;
+        
         View vwEntradas;
 
         string prov_nombre;
@@ -116,7 +116,6 @@ namespace RFIDTrackBin.fragment
         private GridView gvFP;
         List<FleteItem> fpList = new List<FleteItem>();
         private myGVitemAdapterFP fpAdapter;
-        private Android.App.AlertDialog fletesPendientesDialog;
         private AlertDialog _dialogoFletes;
         private int? selectedFleteId = null;
         #endregion

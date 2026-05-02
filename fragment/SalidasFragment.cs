@@ -14,7 +14,6 @@ using Com.Unitech.Lib.Reader;
 using Com.Unitech.Lib.Reader.Event;
 using Com.Unitech.Lib.Reader.Params;
 using Com.Unitech.Lib.Reader.Types;
-using Com.Unitech.Lib.Rgx;
 using Com.Unitech.Lib.Transport.Types;
 using Com.Unitech.Lib.Types;
 using Com.Unitech.Lib.Uhf;
@@ -30,18 +29,14 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
-using System.Data;
 using System.Data.SqlClient;
-using System.Linq;
 using System.Linq;
 using System.Threading.Tasks;
 using Exception = System.Exception;
-using Math = Java.Lang.Math;
-using StringBuilder = System.Text.StringBuilder;
 
 namespace RFIDTrackBin.fragment
 {
-    public class SalidasFragment : BaseFragment, IReaderEventListener, IRfidUhfEventListener, MainReceiver.IEventLitener
+    public class SalidasFragment : BaseFragment, IReaderEventListener, IRfidUhfEventListener, MainReceiver.IEventLitener, IDisposable
     {
         static string TAG = typeof(SalidasFragment).Name;
 
@@ -50,8 +45,8 @@ namespace RFIDTrackBin.fragment
         static string systemUssTriggerScan = "unitech.scanservice.software_scankey";
         static string ExtraScan = "scan";
 
-        public int MAX_MASK = 2;
-        private int NIBLE_SIZE = 4;
+        private const int MAX_MASK = 2;
+        private const int NIBLE_SIZE = 4;
 
         bool accessTagResult;
 
@@ -84,6 +79,7 @@ namespace RFIDTrackBin.fragment
         #region SoundPool
         private SoundPool soundPool;
         private int beepSoundId;
+        private readonly object _soundLock = new object();
         #endregion
 
         MainReceiver mReceiver;
@@ -108,7 +104,6 @@ namespace RFIDTrackBin.fragment
         int totalCajasLeidasINT = 0;
         int totalAcumuladoINT = 0;
 
-        string IdClaveTag;
         View vwSalidas;
 
         string prov_nombre;
@@ -259,27 +254,51 @@ namespace RFIDTrackBin.fragment
             }
         }
 
+        #region SoundPool
         public void InitializeSoundPool()
         {
-            if (Build.VERSION.SdkInt >= BuildVersionCodes.Lollipop)
+            lock (_soundLock)
             {
-                var audioAttributes = new AudioAttributes.Builder()
-                    .SetUsage(AudioUsageKind.AssistanceSonification)
-                    .SetContentType(AudioContentType.Sonification)
-                    .Build();
-
-                soundPool = new SoundPool.Builder()
-                    .SetMaxStreams(5)
-                    .SetAudioAttributes(audioAttributes)
-                    .Build();
+                if (_isDisposed) return;
+                try
+                {
+                    if (Build.VERSION.SdkInt >= BuildVersionCodes.Lollipop)
+                    {
+                        var audioAttributes = new AudioAttributes.Builder()
+                            .SetUsage(AudioUsageKind.AssistanceSonification)
+                            .SetContentType(AudioContentType.Sonification)
+                            .Build();
+                        soundPool = new SoundPool.Builder()
+                            .SetMaxStreams(5)
+                            .SetAudioAttributes(audioAttributes)
+                            .Build();
+                    }
+                    else
+                    {
+                        soundPool = new SoundPool(5, Stream.Music, 0);
+                    }
+                    // ✅ CORREGIDO: Drawable -> Raw
+                    beepSoundId = soundPool.Load(_activity, Resource.Raw.beep, 1);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(TAG, $"Error inicializando SoundPool: {ex.Message}");
+                }
             }
-            else
-            {
-                soundPool = new SoundPool(5, Stream.Music, 0);
-            }
-
-            beepSoundId = soundPool.Load(_activity, Resource.Drawable.beep, 1);
         }
+
+        private void PlayBeepSound()
+        {
+            lock (_soundLock) // ✅ Agregado
+            {
+                if (beepSoundId != 0 && soundPool != null && !_isDisposed)
+                {
+                    try { soundPool.Play(beepSoundId, 1.0f, 1.0f, 0, 0, 1.0f); }
+                    catch (Exception ex) { Log.Warn(TAG, $"Error al reproducir sonido: {ex.Message}"); }
+                }
+            }
+        }
+        #endregion
 
         #region MenuInflater
         public override void OnCreateOptionsMenu(IMenu menu, MenuInflater inflater)
@@ -313,37 +332,98 @@ namespace RFIDTrackBin.fragment
 
         private async Task FinalizarSalidaAsync(int idConse)
         {
-            await ActualizarHoraCierreAsync(idConse);
-            await UpdateFechaUltimoMovimientoAsync(idConse);
+            Activity.RunOnUiThread(() =>
+            {
+                loadingOverlay.Visibility = ViewStates.Visible;
+                btnGuardar.Enabled = false;
+            });
 
-            LimpiarSesionSalida();
+            try
+            {
+                // ✅ Transacción atómica
+                await Task.Run(() =>
+                {
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    conn.Open();
+                    using SqlTransaction transaction = conn.BeginTransaction();
 
-            sprProveedor.SetSelection(0);
-            sprProveedor.Enabled = true;
-            sprRancho.SetSelection(0);
-            sprRancho.Enabled = true;   // Fix B: faltaba re-habilitar
-            sprTabla.SetSelection(0);
-            sprTabla.Enabled = true;    // Fix B: faltaba re-habilitar
-            btnGuardar.Enabled = false;
+                    try
+                    {
+                        // 1. Cerrar Salida
+                        const string queryCierre = @"UPDATE Tb_RFID_Mstr 
+                                             SET HoraCierre = GETDATE() 
+                                             WHERE IdConse = @IdConse AND Mstr_Status = 'A'";
+                        using (SqlCommand cmdCierre = new SqlCommand(queryCierre, conn, transaction))
+                        {
+                            cmdCierre.Parameters.AddWithValue("@IdConse", idConse);
+                            int filasCierre = cmdCierre.ExecuteNonQuery();
+                            if (filasCierre == 0)
+                                throw new InvalidOperationException("La salida ya estaba cerrada o no existe.");
+                        }
 
-            // Limpiar variables de selección
-            prov_clave = "";
-            rch_clave = "";
-            tbl_clave = "";
-            prov_nombre = "";
-            rch_nombre = "";
-            tbl_nombre = "";
+                        // 2. Actualizar Catálogo
+                        const string queryCat = @"UPDATE c 
+                                          SET c.FechaUltimoMovimiento = d.FechaCaptura 
+                                          FROM Tb_RFID_Catalogo c 
+                                          INNER JOIN Tb_RFID_Det d ON c.IdClaveInt = d.IdClaveInt 
+                                          WHERE d.IdConseInv = @IdConseInv";
+                        using (SqlCommand cmdCat = new SqlCommand(queryCat, conn, transaction))
+                        {
+                            cmdCat.Parameters.AddWithValue("@IdConseInv", idConse);
+                            cmdCat.ExecuteNonQuery();
+                        }
 
-            _activity.EnableNavigationItems(
-                Resource.Id.navigation_entradas,
-                Resource.Id.navigation_inventario,
-                Resource.Id.navigation_salidas);
+                        transaction.Commit();
+                    }
+                    catch
+                    {
+                        transaction.Rollback();
+                        throw; // Lanza para que el catch exterior muestre el diálogo
+                    }
+                });
 
-            _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
-            _menu?.FindItem(Resource.Id.final_salidas)?.SetEnabled(false);
-            ClearGridView();
-            totalAcumuladoINT = 0;
-            txtTotalAcumulado.Text = "0";
+                // Si todo fue bien, limpiar UI
+                LimpiarSesionSalida();
+
+                Activity.RunOnUiThread(() =>
+                {
+                    sprProveedor.SetSelection(0);
+                    sprProveedor.Enabled = true;
+                    sprRancho.SetSelection(0);
+                    sprRancho.Enabled = true;
+                    sprTabla.SetSelection(0);
+                    sprTabla.Enabled = true;
+                    btnGuardar.Enabled = false;
+
+                    prov_clave = ""; rch_clave = ""; tbl_clave = "";
+                    prov_nombre = ""; rch_nombre = ""; tbl_nombre = "";
+
+                    _activity.EnableNavigationItems(
+                        Resource.Id.navigation_entradas,
+                        Resource.Id.navigation_inventario,
+                        Resource.Id.navigation_salidas);
+
+                    _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(false);
+                    _menu?.FindItem(Resource.Id.final_salidas)?.SetEnabled(false);
+
+                    ClearGridView();
+                    totalAcumuladoINT = 0;
+                    txtTotalAcumulado.Text = "0";
+                    loadingOverlay.Visibility = ViewStates.Gone;
+
+                    Toast.MakeText(Activity, "Fin de Salida...", ToastLength.Long).Show();
+                });
+            }
+            catch (Exception ex)
+            {
+                Activity.RunOnUiThread(() =>
+                {
+                    loadingOverlay.Visibility = ViewStates.Gone;
+                    btnGuardar.Enabled = true;
+                    MainActivity.ShowDialog("Error al Cerrar",
+                        $"No se pudo finalizar la salida:\n{ex.Message}\n\nIntente nuevamente.");
+                });
+            }
         }
         #endregion
 
@@ -726,49 +806,39 @@ namespace RFIDTrackBin.fragment
             Log.Debug(TAG, "OnPause completado");
         }
 
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (_isDisposed) return;
+            if (disposing)
+            {
+                _isDisposed = true;
+                try { if (_activity?.baseReader?.Action == ActionState.Inventory6c) _activity.baseReader.RfidUhf?.Stop(); } catch { }
+                try { _activity?.baseReader?.RemoveListener(this); _activity?.baseReader?.RfidUhf?.RemoveListener(this); } catch { }
+                try { restoreGunKeyCode(); } catch { }
+
+                lock (_soundLock) { try { soundPool?.Release(); soundPool = null; } catch { } }
+
+                try
+                {
+                    if (gvObject != null) { gvObject.Adapter = null; gvObject.Dispose(); gvObject = null; }
+                    adapter?.Dispose(); adapter = null;
+                    tagEPCList?.Clear(); tagEPCList = null;
+                    _epcLeidosSet?.Clear();
+                    vwProveedor?.Clear(); vwRanchos?.Clear(); vwTablas?.Clear();
+                }
+                catch { }
+            }
+        }
+
         public override void OnDestroy()
         {
-            _isDisposed = true;
-
-            try
-            {
-                if (_activity?.baseReader?.Action == ActionState.Inventory6c)
-                    _activity.baseReader.RfidUhf?.Stop();
-            }
-            catch { }
-
-            try
-            {
-                _activity?.baseReader?.RemoveListener(this);
-                _activity?.baseReader?.RfidUhf?.RemoveListener(this);
-            }
-            catch { }
-
-            try { restoreGunKeyCode(); } catch { }
-
-            try
-            {
-                if (gvObject != null)
-                {
-                    gvObject.Adapter = null;
-                    gvObject.Dispose();
-                    gvObject = null;
-                }
-
-                if (adapter != null)
-                {
-                    adapter.Dispose();
-                    adapter = null;
-                }
-
-                tagEPCList?.Clear();
-                tagEPCList = null;
-
-                soundPool?.Release();
-                soundPool = null;
-            }
-            catch { }
-
+            Dispose(true);
             base.OnDestroy();
         }
         #endregion
@@ -963,12 +1033,6 @@ namespace RFIDTrackBin.fragment
         }
         #endregion
 
-        private void PlayBeepSound()
-        {
-            if (beepSoundId != 0)
-                soundPool.Play(beepSoundId, 1.0f, 1.0f, 0, 0, 1.0f);
-        }
-
         private void FindViews(View view)
         {
             btnGuardar = view.FindViewById<Button>(Resource.Id.btnGuardar);
@@ -1102,6 +1166,7 @@ namespace RFIDTrackBin.fragment
         {
             try
             {
+                if (_isDisposed || vwSalidas == null) return; // ✅ Protección si el usuario sale del fragmento mientras carga
                 const string sql = @"
                     SELECT LTRIM(RTRIM(rch_clave)) AS rch_clave,
                            LTRIM(RTRIM(REPLACE(REPLACE(REPLACE(
@@ -1187,6 +1252,7 @@ namespace RFIDTrackBin.fragment
         {
             try
             {
+                if (_isDisposed || vwSalidas == null) return; // ✅ Protección si el usuario sale del fragmento mientras carga
                 const string sql = @"
                     SELECT LTRIM(RTRIM(tbl_clave)) AS tbl_clave,
                            LTRIM(RTRIM(tbl_nombre)) AS tbl_nombre
@@ -1361,28 +1427,22 @@ namespace RFIDTrackBin.fragment
 
         public async Task<int> ActualizarCatalogoTagsAsync(List<TagLeido> tags, string tipoMovimiento, string usuario, string invArea, string provClave, string ranClave, int? idUnidadNegocio, int? idUbicacion, string tipoUbicacion, int? idFlete)
         {
-            if (tags == null || tags.Count == 0)
-                return 0;
+            if (tags == null || tags.Count == 0) return 0;
 
             const string query = @"
-    UPDATE Tb_RFID_Catalogo
-    SET
-        FechaUltimoMovimiento = @Fecha,
-        Tipo = @TipoMovimiento,
-        Usuario = @Usuario,
-
-        InvArea = CASE WHEN @TipoMovimiento = 'I' THEN @InvArea ELSE InvArea END,
-
-        Prov_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @ProvClave ELSE Prov_Clave END,
-        Ran_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @RanClave ELSE Ran_Clave END,
-
-        IdUnidadNegocioActual = @IdUnidadNegocio,
-        IdUbicacionActual = @IdUbicacion,
-        TipoUbicacion = @TipoUbicacion,
-
-        id_flete = CASE WHEN @TipoMovimiento = 'E' THEN @IdFlete ELSE id_flete END
-
-    WHERE IdClaveTag = @IdClaveTag";
+        UPDATE Tb_RFID_Catalogo
+        SET
+            FechaUltimoMovimiento = @Fecha,
+            Tipo = @TipoMovimiento,
+            Usuario = @Usuario,
+            InvArea = CASE WHEN @TipoMovimiento = 'I' THEN @InvArea ELSE InvArea END,
+            Prov_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @ProvClave ELSE Prov_Clave END,
+            Ran_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @RanClave ELSE Ran_Clave END,
+            IdUnidadNegocioActual = @IdUnidadNegocio,
+            IdUbicacionActual = @IdUbicacion,
+            TipoUbicacion = @TipoUbicacion,
+            id_flete = CASE WHEN @TipoMovimiento = 'E' THEN @IdFlete ELSE id_flete END
+        WHERE IdClaveTag = @IdClaveTag";
 
             try
             {
@@ -1393,42 +1453,52 @@ namespace RFIDTrackBin.fragment
                     using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
                     conn.Open();
 
-                    using SqlCommand cmd = new SqlCommand(query, conn);
-
-                    cmd.Parameters.Add("@Fecha", SqlDbType.DateTime);
-                    cmd.Parameters.Add("@TipoMovimiento", SqlDbType.Char);
-                    cmd.Parameters.Add("@Usuario", SqlDbType.VarChar);
-                    cmd.Parameters.Add("@InvArea", SqlDbType.VarChar);
-                    cmd.Parameters.Add("@ProvClave", SqlDbType.VarChar);
-                    cmd.Parameters.Add("@RanClave", SqlDbType.VarChar);
-                    cmd.Parameters.Add("@IdUnidadNegocio", SqlDbType.Int);
-                    cmd.Parameters.Add("@IdUbicacion", SqlDbType.Int);
-                    cmd.Parameters.Add("@TipoUbicacion", SqlDbType.Char);
-                    cmd.Parameters.Add("@IdFlete", SqlDbType.Int);
-                    cmd.Parameters.Add("@IdClaveTag", SqlDbType.VarChar);
-
-                    foreach (var tag in tags)
+                    // ✅ TRANSACCIÓN AGREGADA
+                    using SqlTransaction transaction = conn.BeginTransaction();
+                    try
                     {
-                        cmd.Parameters["@Fecha"].Value = tag.FechaLectura;
-                        cmd.Parameters["@TipoMovimiento"].Value = tipoMovimiento;
-                        cmd.Parameters["@Usuario"].Value = usuario;
+                        using SqlCommand cmd = new SqlCommand(query, conn, transaction);
 
-                        cmd.Parameters["@InvArea"].Value = invArea ?? (object)DBNull.Value;
-                        cmd.Parameters["@ProvClave"].Value = provClave ?? (object)DBNull.Value;
-                        cmd.Parameters["@RanClave"].Value = ranClave ?? (object)DBNull.Value;
+                        cmd.Parameters.Add("@Fecha", SqlDbType.DateTime);
+                        cmd.Parameters.Add("@TipoMovimiento", SqlDbType.Char);
+                        cmd.Parameters.Add("@Usuario", SqlDbType.VarChar);
+                        cmd.Parameters.Add("@InvArea", SqlDbType.VarChar);
+                        cmd.Parameters.Add("@ProvClave", SqlDbType.VarChar);
+                        cmd.Parameters.Add("@RanClave", SqlDbType.VarChar);
+                        cmd.Parameters.Add("@IdUnidadNegocio", SqlDbType.Int);
+                        cmd.Parameters.Add("@IdUbicacion", SqlDbType.Int);
+                        cmd.Parameters.Add("@TipoUbicacion", SqlDbType.Char);
+                        cmd.Parameters.Add("@IdFlete", SqlDbType.Int);
+                        cmd.Parameters.Add("@IdClaveTag", SqlDbType.VarChar);
 
-                        cmd.Parameters["@IdUnidadNegocio"].Value = idUnidadNegocio ?? (object)DBNull.Value;
-                        cmd.Parameters["@IdUbicacion"].Value = idUbicacion ?? (object)DBNull.Value;
-                        cmd.Parameters["@TipoUbicacion"].Value = tipoUbicacion ?? (object)DBNull.Value;
+                        // ✅ Duplicados en memoria
+                        var snapshot = tags.GroupBy(t => t.EPC).Select(g => g.First()).ToList();
 
-                        cmd.Parameters["@IdFlete"].Value = idFlete ?? (object)DBNull.Value;
+                        foreach (var tag in snapshot)
+                        {
+                            cmd.Parameters["@Fecha"].Value = tag.FechaLectura;
+                            cmd.Parameters["@TipoMovimiento"].Value = tipoMovimiento;
+                            cmd.Parameters["@Usuario"].Value = usuario;
+                            cmd.Parameters["@InvArea"].Value = invArea ?? (object)DBNull.Value;
+                            cmd.Parameters["@ProvClave"].Value = provClave ?? (object)DBNull.Value;
+                            cmd.Parameters["@RanClave"].Value = ranClave ?? (object)DBNull.Value;
+                            cmd.Parameters["@IdUnidadNegocio"].Value = idUnidadNegocio ?? (object)DBNull.Value;
+                            cmd.Parameters["@IdUbicacion"].Value = idUbicacion ?? (object)DBNull.Value;
+                            cmd.Parameters["@TipoUbicacion"].Value = tipoUbicacion ?? (object)DBNull.Value;
+                            cmd.Parameters["@IdFlete"].Value = idFlete ?? (object)DBNull.Value;
+                            cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
 
-                        cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
+                            actualizados += cmd.ExecuteNonQuery();
+                        }
 
-                        actualizados += cmd.ExecuteNonQuery();
+                        transaction.Commit(); // ✅ Confirmar todo o nada
+                        return actualizados;
                     }
-
-                    return actualizados;
+                    catch
+                    {
+                        transaction.Rollback(); // ✅ Deshacer si cualquier tag falla
+                        throw;
+                    }
                 });
             }
             catch (Exception ex)
