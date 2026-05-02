@@ -1,6 +1,4 @@
-﻿using System.Linq;
-using System.Data;
-using Android.App;
+﻿using Android.App;
 using Android.Bluetooth;
 using Android.Content;
 using Android.Media;
@@ -29,9 +27,12 @@ using RFIDTrackBin.enums;
 using RFIDTrackBin.Modal;
 using RFIDTrackBin.Model;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
+using System.Data;
 using System.Data.SqlClient;
+using System.Linq;
 using System.Linq;
 using System.Threading.Tasks;
 using Exception = System.Exception;
@@ -90,6 +91,7 @@ namespace RFIDTrackBin.fragment
 
         GridView gvObject;
         private List<TagLeido> tagEPCList = new List<TagLeido>();
+        private readonly ConcurrentDictionary<string, byte> _epcLeidosSet = new ConcurrentDictionary<string, byte>();
         private myGVitemAdapter adapter;
 
         // FIX B1: Eliminado "DataSet ds" — nunca se usaba. Instancia innecesaria en memoria.
@@ -926,31 +928,38 @@ namespace RFIDTrackBin.fragment
                 UpdateText(IDType.TagTID, tid);
             }
 
+            UpdateText(IDType.TagRSSI, rssi.ToString());
+
+            // ✅ 1. Duplicados O(1) en hilo de fondo (Thread-safe)
+            if (!_epcLeidosSet.TryAdd(tag, 0)) return;
+
+            // ✅ 2. Validación de catálogo en hilo de fondo (no bloquea UI)
+            if (!validaEPC(tag))
+            {
+                _epcLeidosSet.TryRemove(tag, out _);
+                return;
+            }
+
+            // ✅ 3. Actualizar UI solo si pasó las pruebas anteriores
             _activity.RunOnUiThread(() =>
             {
                 if (_isDisposed || tagEPCList == null) return;
 
-                if (tagEPCList.Any(t => t.EPC == tag)) return;
+                PlayBeepSound();
 
-                if (validaEPC(tag))
+                tagEPCList.Add(new TagLeido
                 {
-                    PlayBeepSound();
-                    tagEPCList.Add(new TagLeido
-                    {
-                        EPC = tag,
-                        RSSI = rssi,
-                        FechaLectura = DateTime.Now
-                    });
+                    EPC = tag,
+                    RSSI = rssi,
+                    FechaLectura = DateTime.Now
+                });
 
-                    adapter?.NotifyDataSetChanged();
-                    totalCajasLeidasINT++;
+                adapter?.NotifyDataSetChanged();
+                totalCajasLeidasINT++;
 
-                    if (totalCajasLeidas != null)
-                        totalCajasLeidas.Text = totalCajasLeidasINT.ToString();
-                }
+                if (totalCajasLeidas != null)
+                    totalCajasLeidas.Text = totalCajasLeidasINT.ToString();
             });
-
-            UpdateText(IDType.TagRSSI, rssi.ToString());
         }
         #endregion
 
@@ -1256,100 +1265,98 @@ namespace RFIDTrackBin.fragment
         #region BOTÓN GUARDAR
         private void SetButtonClick()
         {
-            btnGuardar.Click += async (s, e) =>
+            // ✅ Prevenir múltiples suscripciones (patrón aprendido de InventarioFragment)
+            btnGuardar.Click -= BtnGuardarInventario_Click;
+            btnGuardar.Click += BtnGuardarInventario_Click;
+        }
+
+        // ✅ CREAR este método nuevo por separado (mejor que lambda anónima para evitar memory leaks)
+        private async void BtnGuardarInventario_Click(object sender, EventArgs e)
+        {
+            if (!TryAssertReader())
             {
-                if (!TryAssertReader())
+                Log.Warn(TAG, "No se pudo validar el lector.");
+                return;
+            }
+
+            if (tagEPCList == null || tagEPCList.Count == 0)
+            {
+                MainActivity.ShowToast("No hay datos para guardar.");
+                return;
+            }
+
+            loadingOverlay.Visibility = ViewStates.Visible;
+            btnGuardar.Enabled = false;
+
+            int registrosInsertados = 0;
+
+            try
+            {
+                // ✅ 1. Snapshot con deduplicación ANTES de pasar a hilo de fondo
+                List<TagLeido> snapshot = tagEPCList
+                    .GroupBy(t => t.EPC)
+                    .Select(g => g.First())
+                    .ToList();
+
+                // ✅ 2. INSERT en background iterando el SNAPSHOT
+                registrosInsertados = await Task.Run(() =>
                 {
-                    Log.Warn(TAG, "No se pudo validar el lector.");
-                    return;
-                }
+                    int insertados = 0;
+                    const string query = @"
+                INSERT INTO Tb_RFID_Det (IdConseInv, IdClaveInt, FechaCaptura)
+                SELECT @IdConseInv, IdClaveInt, GETDATE()
+                FROM Tb_RFID_Catalogo
+                WHERE IdClaveTag = @IdClaveTag
+                AND NOT EXISTS (
+                    SELECT 1 FROM Tb_RFID_Det
+                    WHERE IdClaveInt = Tb_RFID_Catalogo.IdClaveInt
+                      AND IdConseInv = @IdConseInv
+                )";
 
-                if (tagEPCList == null || tagEPCList.Count == 0)
-                {
-                    MainActivity.ShowToast("No hay datos para guardar.");
-                    return;
-                }
-
-                loadingOverlay.Visibility = ViewStates.Visible;
-                btnGuardar.Enabled = false;
-
-                int registrosInsertados = 0;
-
-                try
-                {
-                    // FIX #4: INSERT en background
-                    List<TagLeido> snapshot = tagEPCList.ToList();
-
-                    registrosInsertados = await Task.Run(() =>
+                    using (SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion))
                     {
-                        int insertados = 0;
-                        const string query = @"
-                            INSERT INTO Tb_RFID_Det (IdConseInv, IdClaveInt, FechaCaptura)
-                            SELECT @IdConseInv, IdClaveInt, GETDATE()
-                            FROM Tb_RFID_Catalogo
-                            WHERE IdClaveTag = @IdClaveTag
-                            AND NOT EXISTS (
-                                SELECT 1 FROM Tb_RFID_Det
-                                WHERE IdClaveInt = Tb_RFID_Catalogo.IdClaveInt
-                                  AND IdConseInv = @IdConseInv
-                            )";
-
-                        using (SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion))
+                        conn.Open();
+                        using (SqlCommand cmd = new SqlCommand(query, conn))
                         {
-                            conn.Open();
-                            using (SqlCommand cmd = new SqlCommand(query, conn))
-                            {
-                                cmd.Parameters.Add(new SqlParameter("@IdClaveTag", SqlDbType.VarChar));
-                                cmd.Parameters.Add(new SqlParameter("@IdConseInv", SqlDbType.Decimal)).Value = IdConse;
+                            cmd.Parameters.Add(new SqlParameter("@IdClaveTag", SqlDbType.VarChar));
+                            cmd.Parameters.Add(new SqlParameter("@IdConseInv", SqlDbType.Decimal)).Value = IdConse;
 
-                                foreach (var tag in tagEPCList)
-                                {
-                                    cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
-                                    insertados += cmd.ExecuteNonQuery();
-                                }
+                            // ✅ CORREGIDO: Iterar 'snapshot' en lugar de 'tagEPCList'
+                            foreach (var tag in snapshot)
+                            {
+                                cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
+                                insertados += cmd.ExecuteNonQuery();
                             }
                         }
-                        return insertados;
-                    });
-
-                    if (registrosInsertados > 0)
-                    {
-                        if (sprProveedor.SelectedItemPosition <= 0)
-                        {
-                            MainActivity.ShowToast("Seleccione un Proveedor.");
-                            return;
-                        }
-                        if (sprRancho.SelectedItemPosition <= 0)
-                        {
-                            MainActivity.ShowToast("Seleccione un Rancho.");
-                            return;
-                        }
-                        if (sprTabla.SelectedItemPosition <= 0)
-                        {
-                            MainActivity.ShowToast("Seleccione una Tabla.");
-                            return;
-                        }
-
-                        await ActualizarCatalogoTagsAsync(snapshot, "S", _activity.usuario, null, prov_clave, rch_clave, int.Parse(_activity.idUnidadNegocio), 24, "E", null);
                     }
+                    return insertados;
+                });
 
-                    totalAcumuladoINT += registrosInsertados;
-                    txtTotalAcumulado.Text = totalAcumuladoINT.ToString();
+                // Validaciones de UI después del INSERT
+                if (registrosInsertados > 0)
+                {
+                    if (sprProveedor.SelectedItemPosition <= 0) { MainActivity.ShowToast("Seleccione un Proveedor."); return; }
+                    if (sprRancho.SelectedItemPosition <= 0) { MainActivity.ShowToast("Seleccione un Rancho."); return; }
+                    if (sprTabla.SelectedItemPosition <= 0) { MainActivity.ShowToast("Seleccione una Tabla."); return; }
 
-                    MainActivity.ShowDialog("INFORMACIÓN ALMACENADA",
-                        $"Se han guardado {registrosInsertados} registros exitosamente.");
-                    ClearGridView();
+                    await ActualizarCatalogoTagsAsync(snapshot, "S", _activity.usuario, null, prov_clave, rch_clave, int.Parse(_activity.idUnidadNegocio), 24, "E", null);
                 }
-                catch (Exception ex)
-                {
-                    MainActivity.ShowToast("Error al guardar: " + ex.Message);
-                }
-                finally
-                {
-                    loadingOverlay.Visibility = ViewStates.Gone;
-                    btnGuardar.Enabled = true;
-                }
-            };
+
+                totalAcumuladoINT += registrosInsertados;
+                txtTotalAcumulado.Text = totalAcumuladoINT.ToString();
+
+                MainActivity.ShowDialog("INFORMACIÓN ALMACENADA", $"Se han guardado {registrosInsertados} registros exitosamente.");
+                ClearGridView();
+            }
+            catch (Exception ex)
+            {
+                MainActivity.ShowToast("Error al guardar: " + ex.Message);
+            }
+            finally
+            {
+                loadingOverlay.Visibility = ViewStates.Gone;
+                btnGuardar.Enabled = true;
+            }
         }
 
         public async Task<int> ActualizarCatalogoTagsAsync(List<TagLeido> tags, string tipoMovimiento, string usuario, string invArea, string provClave, string ranClave, int? idUnidadNegocio, int? idUbicacion, string tipoUbicacion, int? idFlete)
@@ -1659,6 +1666,7 @@ namespace RFIDTrackBin.fragment
             _activity.RunOnUiThread(() =>
             {
                 tagEPCList.Clear();
+                _epcLeidosSet.Clear(); // ✅ Agregado
                 adapter.NotifyDataSetChanged();
                 totalCajasLeidasINT = 0;
                 if (totalCajasLeidas != null)

@@ -24,6 +24,7 @@ using RFIDTrackBin.enums;
 using RFIDTrackBin.Modal;
 using RFIDTrackBin.Model;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.SqlClient;
@@ -35,7 +36,7 @@ using Exception = System.Exception;
 namespace RFIDTrackBin.fragment
 {
     [IntentFilter(new[] { NfcAdapter.ActionNdefDiscovered, NfcAdapter.ActionTagDiscovered, Intent.CategoryDefault })]
-    public class InventarioFragment : BaseFragment, IReaderEventListener, IRfidUhfEventListener, MainReceiver.IEventLitener, View.IOnTouchListener
+    public class InventarioFragment : BaseFragment, IReaderEventListener, IRfidUhfEventListener, MainReceiver.IEventLitener, View.IOnTouchListener, IDisposable
     {
         static string TAG = typeof(InventarioFragment).Name;
 
@@ -66,6 +67,7 @@ namespace RFIDTrackBin.fragment
         #region SoundPool
         private SoundPool soundPool;
         private int beepSoundId;
+        private readonly object _soundLock = new object();
         #endregion
 
         MainReceiver mReceiver;
@@ -76,12 +78,9 @@ namespace RFIDTrackBin.fragment
         private myGVitemAdapter adapter;
 
         DataSet ds = new DataSet();
-        public static DataTable areas = new DataTable("areas");
+        private DataTable areas = new DataTable("areas");
 
-        private readonly List<TagLeido> _pendingTags = new List<TagLeido>();
-        private readonly Handler _uiHandler = new Handler(Looper.MainLooper);
-        private bool _updateScheduled = false;
-        private HashSet<string> _epcLeidosSet = new HashSet<string>();
+        private readonly ConcurrentDictionary<string, byte> _epcLeidosSet = new ConcurrentDictionary<string, byte>();
 
         int totalCajasLeidasINT = 0;
         int totalAcumuladoINT = 0;
@@ -95,6 +94,8 @@ namespace RFIDTrackBin.fragment
 
         ProgressBar progressBar;
         RelativeLayout loadingOverlay;
+
+        private bool _pendingRestoreState = false;
 
         #region PERSISTENCIA DE INVENTARIO
         private const string PREFS_NAME = "InventarioPrefs";
@@ -113,43 +114,46 @@ namespace RFIDTrackBin.fragment
         public override async void OnViewCreated(View view, Bundle savedInstanceState)
         {
             base.OnViewCreated(view, savedInstanceState);
-
-            bool ok = await MainActivity.BtHelper.EnsureBluetoothAsync();
-            if (!ok)
+            try
             {
-                Toast.MakeText(Activity, "Bluetooth es obligatorio para el inventario.", ToastLength.Short).Show();
-                return;
+                bool ok = await MainActivity.BtHelper.EnsureBluetoothAsync();
+                if (!ok)
+                {
+                    Toast.MakeText(Activity, "Bluetooth es obligatorio para el inventario.", ToastLength.Short).Show();
+                    return;
+                }
+
+                FindViewById(view);
+                await LoadAreasAsync(view);
+                SetButtonClick();
+                InitializeSoundPool();
+                HasOptionsMenu = true;
+
+                mReceiver = new MainReceiver(this);
+                IntentFilter filter = new IntentFilter();
+                filter.AddAction(MainReceiver.rfidGunPressed);
+                filter.AddAction(MainReceiver.rfidGunReleased);
+                _activity.RegisterReceiver(mReceiver, filter);
+
+                adapter = new myGVitemAdapter(_activity, tagsLeidos);
+                gvObject.Adapter = adapter;
+
+                sprAreas.ItemSelected += sprAreas_ItemSelected;
+                btnGuardarInventario.Enabled = false;
+                _nfcAdapter = NfcAdapter.GetDefaultAdapter(_activity);
+
+                _activity.EnableNavigationItems(Resource.Id.navigation_entradas, Resource.Id.navigation_salidas);
+
+                progressBar = view.FindViewById<ProgressBar>(Resource.Id.progressBarGuardar);
+                loadingOverlay = view.FindViewById<RelativeLayout>(Resource.Id.loadingOverlay);
+
+                VerificarInventarioPendiente();
             }
-
-            FindViewById(view);
-
-            // FIX #4: Carga de áreas en background
-            await LoadAreasAsync(view);
-
-            SetButtonClick();
-            InitializeSoundPool();
-
-            HasOptionsMenu = true;
-
-            mReceiver = new MainReceiver(this);
-            IntentFilter filter = new IntentFilter();
-            filter.AddAction(MainReceiver.rfidGunPressed);
-            filter.AddAction(MainReceiver.rfidGunReleased);
-            _activity.RegisterReceiver(mReceiver, filter);
-
-            adapter = new myGVitemAdapter(_activity, tagsLeidos);
-            gvObject.Adapter = adapter;
-
-            sprAreas.ItemSelected += sprAreas_ItemSelected;
-            btnGuardarInventario.Enabled = false;
-            _nfcAdapter = NfcAdapter.GetDefaultAdapter(_activity);
-
-            _activity.EnableNavigationItems(Resource.Id.navigation_entradas, Resource.Id.navigation_salidas);
-
-            progressBar = view.FindViewById<ProgressBar>(Resource.Id.progressBarGuardar);
-            loadingOverlay = view.FindViewById<RelativeLayout>(Resource.Id.loadingOverlay);
-
-            VerificarInventarioPendiente();
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error fatal inicializando InventarioFragment: {ex.Message}");
+                MainActivity.ShowToast("Error crítico al cargar la vista de inventario.");
+            }
         }
 
         #region GESTIÓN DE INVENTARIO PERSISTENTE
@@ -219,8 +223,8 @@ namespace RFIDTrackBin.fragment
                     }
                 }
 
-                _menu?.FindItem(Resource.Id.inicio_inventario)?.SetEnabled(false);
-                _menu?.FindItem(Resource.Id.final_inventario)?.SetEnabled(true);
+                _pendingRestoreState = true;
+                ApplyMenuState();
                 btnGuardarInventario.Enabled = true;
                 if (sprAreas != null) sprAreas.Enabled = false;
 
@@ -237,6 +241,17 @@ namespace RFIDTrackBin.fragment
                 Toast.MakeText(Activity, "Error al recuperar inventario pendiente", ToastLength.Long).Show();
                 await CerrarInventarioHuerfanoAsync(idInventario);
                 LimpiarPreferencias();
+            }
+        }
+
+        private void ApplyMenuState()
+        {
+            if (_menu == null) return;
+
+            if (_pendingRestoreState)
+            {
+                _menu.FindItem(Resource.Id.inicio_inventario)?.SetEnabled(false);
+                _menu.FindItem(Resource.Id.final_inventario)?.SetEnabled(true);
             }
         }
 
@@ -307,24 +322,34 @@ namespace RFIDTrackBin.fragment
 
         public void InitializeSoundPool()
         {
-            if (Build.VERSION.SdkInt >= BuildVersionCodes.Lollipop)
+            lock (_soundLock)
             {
-                var audioAttributes = new AudioAttributes.Builder()
-                    .SetUsage(AudioUsageKind.AssistanceSonification)
-                    .SetContentType(AudioContentType.Sonification)
-                    .Build();
-
-                soundPool = new SoundPool.Builder()
-                    .SetMaxStreams(5)
-                    .SetAudioAttributes(audioAttributes)
-                    .Build();
+                if (_isDisposed) return;
+                try
+                {
+                    if (Build.VERSION.SdkInt >= BuildVersionCodes.Lollipop)
+                    {
+                        var audioAttributes = new AudioAttributes.Builder()
+                            .SetUsage(AudioUsageKind.AssistanceSonification)
+                            .SetContentType(AudioContentType.Sonification)
+                            .Build();
+                        soundPool = new SoundPool.Builder()
+                            .SetMaxStreams(5)
+                            .SetAudioAttributes(audioAttributes)
+                            .Build();
+                    }
+                    else
+                    {
+                        soundPool = new SoundPool(5, Stream.Music, 0);
+                    }
+                    // ✅ CAMBIO AQUÍ: Drawable -> Raw
+                    beepSoundId = soundPool.Load(_activity, Resource.Raw.beep, 1);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(TAG, $"Error inicializando SoundPool: {ex.Message}");
+                }
             }
-            else
-            {
-                soundPool = new SoundPool(5, Stream.Music, 0);
-            }
-
-            beepSoundId = soundPool.Load(_activity, Resource.Drawable.beep, 1);
         }
 
         #region NFC
@@ -348,6 +373,10 @@ namespace RFIDTrackBin.fragment
             _menu = menu;
             menu.FindItem(Resource.Id.inicio_inventario).SetEnabled(false);
             menu.FindItem(Resource.Id.final_inventario).SetEnabled(false);
+
+            // ✅ Aplicar estado pendiente si VerificarInventarioPendiente ya corrió
+            ApplyMenuState();
+
             base.OnCreateOptionsMenu(menu, inflater);
         }
 
@@ -493,8 +522,22 @@ namespace RFIDTrackBin.fragment
                 // desde Task.Run — nunca bloquean el UI thread
                 await Task.Run(() =>
                 {
-                    ActualizarHoraCierre(IdConseInv);
-                    UpdateFechaUltimoMovimiento(IdConseInv);
+                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                    conn.Open();
+                    using SqlTransaction transaction = conn.BeginTransaction();
+
+                    try
+                    {
+                        ActualizarHoraCierre(conn, transaction, IdConseInv);
+                        UpdateFechaUltimoMovimiento(conn, transaction, IdConseInv);
+
+                        transaction.Commit();
+                    }
+                    catch
+                    {
+                        transaction.Rollback();
+                        throw;
+                    }
                 });
 
                 LimpiarPreferencias();
@@ -596,64 +639,25 @@ namespace RFIDTrackBin.fragment
                 return -1;
             }
         }
-
-        // Shim de compatibilidad (llamado desde Task.Run en FinalizarInventarioAsync — hilo de fondo, OK)
-        private int InsertarInventario(string invArea, string usuario, string invStatus,
-            string idUnidadNegocio, string idArea)
-            => InsertarInventarioAsync(invArea, usuario, invStatus, idUnidadNegocio, idArea).GetAwaiter().GetResult();
         #endregion
 
         #region FINALIZAR INVENTARIO
         // Llamados SOLO desde Task.Run (hilo de fondo) en FinalizarInventarioAsync — correcto
-        public void ActualizarHoraCierre(decimal idConseInv)
+        public void ActualizarHoraCierre(SqlConnection conn, SqlTransaction tx, decimal idConseInv)
         {
-            if (idConseInv <= 0)
-                throw new ArgumentException("ID de inventario inválido", nameof(idConseInv));
-
-            const string query = @"
-                UPDATE Tb_RFID_Inventario
-                SET HoraCierre = GETDATE()
-                WHERE IdConseInv = @IdConseInv AND HoraCierre IS NULL";
-
-            using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
-            using SqlCommand cmd = new SqlCommand(query, conn);
+            const string query = @"UPDATE Tb_RFID_Inventario SET HoraCierre = GETDATE() WHERE IdConseInv = @IdConseInv AND HoraCierre IS NULL";
+            using SqlCommand cmd = new SqlCommand(query, conn, tx);
             cmd.Parameters.AddWithValue("@IdConseInv", idConseInv);
-            conn.Open();
             int rows = cmd.ExecuteNonQuery();
-
-            if (rows == 0)
-                throw new InvalidOperationException(
-                    $"El inventario {idConseInv} ya estaba cerrado o no existe");
-
-            Log.Info(TAG, $"Hora de cierre actualizada para inventario {idConseInv}");
+            if (rows == 0) throw new InvalidOperationException($"Inventario {idConseInv} ya cerrado o no existe");
         }
 
-        public void UpdateFechaUltimoMovimiento(int idConseInv)
+        public void UpdateFechaUltimoMovimiento(SqlConnection conn, SqlTransaction tx, int idConseInv)
         {
-            const string query = @"
-                UPDATE c
-                SET c.FechaUltimoMovimiento = d.FechaCaptura
-                FROM Tb_RFID_Catalogo c
-                INNER JOIN Tb_RFID_DetInv d ON c.IdClaveInt = d.IdClaveInt
-                WHERE d.IdConseInv = @IdConseInv";
-
-            try
-            {
-                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
-                conn.Open();
-                using SqlCommand cmd = new SqlCommand(query, conn);
-                cmd.Parameters.AddWithValue("@IdConseInv", idConseInv);
-                int rows = cmd.ExecuteNonQuery();
-                MainActivity.ShowToast($"{rows} filas actualizadas en el catálogo");
-            }
-            catch (SqlException sqlEx)
-            {
-                MainActivity.ShowToast($"Error SQL al actualizar: {sqlEx.Message}");
-            }
-            catch (Exception ex)
-            {
-                MainActivity.ShowToast($"Error al actualizar: {ex.Message}");
-            }
+            const string query = @"UPDATE c SET c.FechaUltimoMovimiento = d.FechaCaptura FROM Tb_RFID_Catalogo c INNER JOIN Tb_RFID_DetInv d ON c.IdClaveInt = d.IdClaveInt WHERE d.IdConseInv = @IdConseInv";
+            using SqlCommand cmd = new SqlCommand(query, conn, tx);
+            cmd.Parameters.AddWithValue("@IdConseInv", idConseInv);
+            cmd.ExecuteNonQuery();
         }
         #endregion
 
@@ -715,38 +719,81 @@ namespace RFIDTrackBin.fragment
             Log.Debug(TAG, "OnPause completado");
         }
 
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        protected virtual void Dispose(bool disposing)
+        {
+            // Prevenir doble ejecución (por si llaman a Dispose manualmente y luego pasa por OnDestroy)
+            if (_isDisposed) return;
+
+            if (disposing)
+            {
+                _isDisposed = true;
+
+                // 1. Detener inventario si está corriendo
+                try
+                {
+                    if (_activity?.baseReader?.Action == ActionState.Inventory6c)
+                        _activity.baseReader.RfidUhf?.Stop();
+                }
+                catch { }
+
+                // 2. Remover listeners del lector
+                try
+                {
+                    _activity?.baseReader?.RemoveListener(this);
+                    _activity?.baseReader?.RfidUhf?.RemoveListener(this);
+                }
+                catch { }
+
+                // 3. Restaurar el mapeo del gatillo físico (¡Aquí está el que faltaba!)
+                try
+                {
+                    restoreGunKeyCode();
+                }
+                catch { }
+
+                // 4. Liberar recursos de audio (Protegido con el lock que agregamos antes)
+                lock (_soundLock)
+                {
+                    try
+                    {
+                        soundPool?.Release();
+                        soundPool = null;
+                    }
+                    catch { }
+                }
+
+                // 5. Liberar vistas, adaptadores y colecciones
+                try
+                {
+                    if (gvObject != null)
+                    {
+                        gvObject.Adapter = null;
+                        gvObject.Dispose();
+                        gvObject = null;
+                    }
+
+                    adapter?.Dispose();
+                    adapter = null;
+
+                    tagsLeidos?.Clear();
+                    tagsLeidos = null; // ✅ Mantenemos el = null para ayudar al Garbage Collector
+
+                    _epcLeidosSet?.Clear();
+                    areas?.Clear(); // Limpiamos el DataTable
+                }
+                catch { }
+            }
+        }
+
         public override void OnDestroy()
         {
-            _isDisposed = true;
-
-            try
-            {
-                if (_activity?.baseReader?.Action == ActionState.Inventory6c)
-                    _activity.baseReader.RfidUhf?.Stop();
-            }
-            catch { }
-
-            try
-            {
-                _activity?.baseReader?.RemoveListener(this);
-                _activity?.baseReader?.RfidUhf?.RemoveListener(this);
-            }
-            catch { }
-
-            try { restoreGunKeyCode(); } catch { }
-
-            try
-            {
-                if (gvObject != null) { gvObject.Adapter = null; gvObject.Dispose(); gvObject = null; }
-                adapter?.Dispose();
-                adapter = null;
-                tagsLeidos?.Clear();
-                tagsLeidos = null;
-                soundPool?.Release();
-                soundPool = null;
-            }
-            catch { }
-
+            Dispose(true);
             base.OnDestroy();
         }
         #endregion
@@ -855,50 +902,6 @@ namespace RFIDTrackBin.fragment
             accessTagResult = (code == ResultCode.NoError);
         }
 
-        public void OnRfidUhfReadTagOG(BaseUHF uhf, string tag, Java.Lang.Object @params)
-        {
-            if (_isDisposed || !IsAdded || _activity == null || tagsLeidos == null)
-            {
-                Log.Warn(TAG, "OnRfidUhfReadTag: Fragmento no disponible, ignorando tag");
-                return;
-            }
-
-            if (StringUtil.IsNullOrEmpty(tag)) return;
-
-            float rssi = 0;
-            string tid = "";
-            if (@params != null)
-            {
-                TagExtParam param = (TagExtParam)@params;
-                rssi = param.Rssi;
-                tid = param.TID;
-            }
-
-            if (!_isFindTag)
-            {
-                UpdateText(IDType.TagEPC, tag);
-                UpdateText(IDType.TagTID, tid);
-            }
-
-            _activity.RunOnUiThread(() =>
-            {
-                if (_isDisposed || tagsLeidos == null) return;
-                if (tagsLeidos.Any(t => t.EPC == tag)) return;
-
-                // FIX #8: validaEPC usa HashSet O(1)
-                if (validaEPC(tag))
-                {
-                    PlayBeepSound();
-                    tagsLeidos.Add(new TagLeido { EPC = tag, RSSI = rssi, FechaLectura = DateTime.Now });
-                    adapter?.NotifyDataSetChanged();
-                    totalCajasLeidasINT++;
-                    if (totalCajasLeidas != null)
-                        totalCajasLeidas.Text = totalCajasLeidasINT.ToString();
-                }
-            });
-
-            UpdateText(IDType.TagRSSI, rssi.ToString());
-        }
         public void OnRfidUhfReadTag(BaseUHF uhf, string tag, Java.Lang.Object @params)
         {
             if (_isDisposed || !IsAdded || _activity == null || tagsLeidos == null)
@@ -925,19 +928,22 @@ namespace RFIDTrackBin.fragment
                 UpdateText(IDType.TagTID, tid);
             }
 
+            UpdateText(IDType.TagRSSI, rssi.ToString());
+
+            // ✅ 1. Duplicados (Thread-safe ya con ConcurrentDictionary)
+            if (!_epcLeidosSet.TryAdd(tag, 0)) return;
+
+            // ✅ 2. Validación de catálogo (Aún en hilo de fondo, no bloquea UI)
+            if (!validaEPC(tag))
+            {
+                _epcLeidosSet.TryRemove(tag, out _);
+                return;
+            }
+
+            // ✅ 3. Si pasa las validaciones, SALTAR a la UI solo para actualizar visualmente
             _activity.RunOnUiThread(() =>
             {
                 if (_isDisposed || tagsLeidos == null) return;
-
-                // evitar duplicados
-                if (!_epcLeidosSet.Add(tag)) return;
-
-                // validar contra catálogo
-                if (!validaEPC(tag))
-                {
-                    _epcLeidosSet.Remove(tag);
-                    return;
-                }
 
                 PlayBeepSound();
 
@@ -949,21 +955,30 @@ namespace RFIDTrackBin.fragment
                 });
 
                 adapter?.NotifyDataSetChanged();
-
                 totalCajasLeidasINT++;
 
                 if (totalCajasLeidas != null)
                     totalCajasLeidas.Text = totalCajasLeidasINT.ToString();
             });
-
-            UpdateText(IDType.TagRSSI, rssi.ToString());
         }
         #endregion
 
         private void PlayBeepSound()
         {
-            if (beepSoundId != 0)
-                soundPool.Play(beepSoundId, 1.0f, 1.0f, 0, 0, 1.0f);
+            lock (_soundLock) // ✅ Agregado lock
+            {
+                if (beepSoundId != 0 && soundPool != null && !_isDisposed)
+                {
+                    try
+                    {
+                        soundPool.Play(beepSoundId, 1.0f, 1.0f, 0, 0, 1.0f);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warn(TAG, $"Error al reproducir sonido: {ex.Message}");
+                    }
+                }
+            }
         }
 
         private void FindViewById(View view)
@@ -1032,134 +1047,6 @@ namespace RFIDTrackBin.fragment
         #endregion
 
         #region BOTÓN GUARDAR
-        private void SetButtonClickV1()
-        {
-            btnGuardarInventario.Click += async (s, e) =>
-            {
-                if (!TryAssertReader())
-                {
-                    Log.Warn(TAG, "No se pudo validar el lector.");
-                    return;
-                }
-
-                if (tagsLeidos == null || tagsLeidos.Count == 0)
-                {
-                    MainActivity.ShowToast("No hay datos para guardar.");
-                    return;
-                }
-
-                loadingOverlay.Visibility = ViewStates.Visible;
-                btnGuardarInventario.Enabled = false;
-
-                int registrosInsertados = 0;
-
-                try
-                {
-                    // FIX #4: INSERT en background
-                    List<TagLeido> snapshot = tagsLeidos.ToList();
-
-                    registrosInsertados = await Task.Run(() =>
-                    {
-                        // 🔹 1. Filtrar duplicados en memoria
-                        var snapshot = tagsLeidos
-                            .GroupBy(t => t.EPC)
-                            .Select(g => g.First())
-                            .ToList();
-
-                        // 🔹 2. Crear DataTable
-                        DataTable dt = new DataTable();
-                        dt.Columns.Add("IdClaveTag", typeof(string));
-                        dt.Columns.Add("FechaCaptura", typeof(DateTime));
-
-                        foreach (var tag in snapshot)
-                        {
-                            dt.Rows.Add(tag.EPC, tag.FechaLectura);
-                        }
-
-                        using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
-                        conn.Open();
-
-                        using SqlTransaction transaction = conn.BeginTransaction();
-
-                        try
-                        {
-                            // 🔹 3. Limpiar staging (opcional pero recomendado)
-                            using (SqlCommand cleanCmd = new SqlCommand("TRUNCATE TABLE Tb_RFID_DetInv_Staging", conn, transaction))
-                            {
-                                cleanCmd.ExecuteNonQuery();
-                            }
-
-                            // 🔹 4. Bulk insert
-                            using (SqlBulkCopy bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.Default, transaction))
-                            {
-                                bulk.DestinationTableName = "Tb_RFID_DetInv_Staging";
-
-                                bulk.ColumnMappings.Add("IdClaveTag", "IdClaveTag");
-                                bulk.ColumnMappings.Add("FechaCaptura", "FechaCaptura");
-
-                                bulk.WriteToServer(dt);
-                            }
-
-                            // 🔹 5. Insert final evitando duplicados
-                            string insertFinal = @"INSERT INTO Tb_RFID_DetInv (IdConseInv, IdClaveInt, FechaCaptura)
-                                                   SELECT DISTINCT
-                                                   @IdConseInv,
-                                                   c.IdClaveInt,
-                                                   s.FechaCaptura
-                                                   FROM Tb_RFID_DetInv_Staging s
-                                                   INNER JOIN Tb_RFID_Catalogo c ON c.IdClaveTag = s.IdClaveTag
-                                                   WHERE NOT EXISTS (
-                                                        SELECT 1
-                                                        FROM Tb_RFID_DetInv d
-                                                        WHERE d.IdConseInv = @IdConseInv
-                                                        AND d.IdClaveInt = c.IdClaveInt
-                                                    );";
-
-                            using SqlCommand cmd = new SqlCommand(insertFinal, conn, transaction);
-                            cmd.Parameters.AddWithValue("@IdConseInv", IdConseInv);
-
-                            int insertados = cmd.ExecuteNonQuery();
-
-                            transaction.Commit();
-                            return insertados;
-                        }
-                        catch
-                        {
-                            transaction.Rollback();
-                            throw;
-                        }
-                    });
-
-                    if (registrosInsertados > 0)
-                    {
-                        if (sprAreas.SelectedItemPosition <= 0)
-                        {
-                            MainActivity.ShowToast("Seleccione un área.");
-                            return;
-                        }
-                        int indice = sprAreas.SelectedItemPosition - 1;
-                        await ActualizarCatalogoTagsAsync(snapshot, "I", _activity.usuario, sprAreas.SelectedItem?.ToString(), null, null, int.Parse(_activity.idUnidadNegocio), int.Parse(areas.Rows[indice]["IdArea"].ToString()), "A", null, true);
-                    }
-
-                    totalAcumuladoINT += registrosInsertados;
-                    txtTotalAcumulado.Text = totalAcumuladoINT.ToString();
-
-                    MainActivity.ShowDialog("INFORMACIÓN ALMACENADA",
-                        $"Se han guardado {registrosInsertados} registros exitosamente.");
-                    ClearGridView();
-                }
-                catch (Exception ex)
-                {
-                    MainActivity.ShowToast("Error al guardar: " + ex.Message);
-                }
-                finally
-                {
-                    loadingOverlay.Visibility = ViewStates.Gone;
-                    btnGuardarInventario.Enabled = true;
-                }
-            };
-        }
-
         private void SetButtonClick()
         {
             // 🔴 Evitar múltiples suscripciones
@@ -1266,7 +1153,7 @@ namespace RFIDTrackBin.fragment
                         int.Parse(areas.Rows[indice]["IdArea"].ToString()),
                         "A",
                         null,
-                        true // 🔥 modo prueba (cambiar a false en producción)
+                        AppSettings.ModoPrueba // 🔥 modo prueba (cambiar a false en producción)
                     );
                 }
 
@@ -1292,84 +1179,6 @@ namespace RFIDTrackBin.fragment
         }
 
 
-        public async Task<int> ActualizarCatalogoTagsAsyncV1(List<TagLeido> tags, string tipoMovimiento, string usuario, string invArea, string provClave, string ranClave, int? idUnidadNegocio, int? idUbicacion, string tipoUbicacion, int? idFlete)
-        {
-            if (tags == null || tags.Count == 0)
-                return 0;
-
-            const string query = @"
-    UPDATE Tb_RFID_Catalogo
-    SET
-        FechaUltimoMovimiento = @Fecha,
-        Tipo = @TipoMovimiento,
-        Usuario = @Usuario,
-
-        InvArea = CASE WHEN @TipoMovimiento = 'I' THEN @InvArea ELSE InvArea END,
-
-        Prov_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @ProvClave ELSE Prov_Clave END,
-        Ran_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @RanClave ELSE Ran_Clave END,
-
-        IdUnidadNegocioActual = @IdUnidadNegocio,
-        IdUbicacionActual = @IdUbicacion,
-        TipoUbicacion = @TipoUbicacion,
-
-        id_flete = CASE WHEN @TipoMovimiento = 'E' THEN @IdFlete ELSE id_flete END
-
-    WHERE IdClaveTag = @IdClaveTag";
-
-            try
-            {
-                return await Task.Run(() =>
-                {
-                    int actualizados = 0;
-
-                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
-                    conn.Open();
-
-                    using SqlCommand cmd = new SqlCommand(query, conn);
-
-                    cmd.Parameters.Add("@Fecha", SqlDbType.DateTime);
-                    cmd.Parameters.Add("@TipoMovimiento", SqlDbType.Char);
-                    cmd.Parameters.Add("@Usuario", SqlDbType.VarChar);
-                    cmd.Parameters.Add("@InvArea", SqlDbType.VarChar);
-                    cmd.Parameters.Add("@ProvClave", SqlDbType.VarChar);
-                    cmd.Parameters.Add("@RanClave", SqlDbType.VarChar);
-                    cmd.Parameters.Add("@IdUnidadNegocio", SqlDbType.Int);
-                    cmd.Parameters.Add("@IdUbicacion", SqlDbType.Int);
-                    cmd.Parameters.Add("@TipoUbicacion", SqlDbType.Char);
-                    cmd.Parameters.Add("@IdFlete", SqlDbType.Int);
-                    cmd.Parameters.Add("@IdClaveTag", SqlDbType.VarChar);
-
-                    foreach (var tag in tags)
-                    {
-                        cmd.Parameters["@Fecha"].Value = tag.FechaLectura;
-                        cmd.Parameters["@TipoMovimiento"].Value = tipoMovimiento;
-                        cmd.Parameters["@Usuario"].Value = usuario;
-
-                        cmd.Parameters["@InvArea"].Value = invArea ?? (object)DBNull.Value;
-                        cmd.Parameters["@ProvClave"].Value = provClave ?? (object)DBNull.Value;
-                        cmd.Parameters["@RanClave"].Value = ranClave ?? (object)DBNull.Value;
-
-                        cmd.Parameters["@IdUnidadNegocio"].Value = idUnidadNegocio ?? (object)DBNull.Value;
-                        cmd.Parameters["@IdUbicacion"].Value = idUbicacion ?? (object)DBNull.Value;
-                        cmd.Parameters["@TipoUbicacion"].Value = tipoUbicacion ?? (object)DBNull.Value;
-
-                        cmd.Parameters["@IdFlete"].Value = idFlete ?? (object)DBNull.Value;
-
-                        cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
-
-                        actualizados += cmd.ExecuteNonQuery();
-                    }
-
-                    return actualizados;
-                });
-            }
-            catch (Exception ex)
-            {
-                Log.Error(TAG, $"Error actualizando catálogo: {ex}");
-                return -1;
-            }
-        }
         public async Task<int> ActualizarCatalogoTagsAsync(
             List<TagLeido> tags,
             string tipoMovimiento,
@@ -1517,7 +1326,7 @@ WHERE IdClaveTag = @IdClaveTag";
                     _activity.baseReader.RfidUhf.InventoryTime = 150;
                     _activity.baseReader.RfidUhf.IdleTime = 0;
                     _activity.baseReader.RfidUhf.Target = Target.A;
-                    _activity.baseReader.RfidUhf.Session = Session.S0;
+                    _activity.baseReader.RfidUhf.Session = Session.S3;
                     _activity.baseReader.RfidUhf.AlgorithmType = AlgorithmType.DynamicQ;
                     _activity.baseReader.RfidUhf.ToggleTarget = true;
                     _activity.baseReader.RfidUhf.ContinuousMode = true;
@@ -1694,12 +1503,15 @@ WHERE IdClaveTag = @IdClaveTag";
 
         public bool OnTouch(View v, MotionEvent e)
         {
-            if (sprAreas != null && v.Id == sprAreas.Id && e.Action == MotionEventActions.Down)
+            // ✅ Solo bloquear si el inventario NO ha iniciado (el botón guardar está deshabilitado)
+            if (v.Id == sprAreas?.Id &&
+                e.Action == MotionEventActions.Down &&
+                btnGuardarInventario != null && !btnGuardarInventario.Enabled)
             {
-                Toast.MakeText(_activity, "Debe de dar Inicio a la captura del inventario!", ToastLength.Short).Show();
-                return true;
+                Toast.MakeText(_activity, "Debe de dar Inicio a la captura del inventario primero.", ToastLength.Short).Show();
+                return true; // Consumir el evento
             }
-            return false;
+            return false; // Permitir el funcionamiento normal del spinner
         }
 
         #region VALIDAR TAG VS CATÁLOGO
