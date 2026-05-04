@@ -33,6 +33,7 @@ using System.Data.SqlClient;
 using System.Linq;
 using System.Threading.Tasks;
 using Exception = System.Exception;
+using AndroidX.AppCompat.App;
 
 namespace RFIDTrackBin.fragment
 {
@@ -197,7 +198,7 @@ namespace RFIDTrackBin.fragment
                              $"Rancho: {nombreRancho}\n" +
                              $"Tabla: {nombreTabla}";
 
-            new AlertDialog.Builder(_activity)
+            new Android.App.AlertDialog.Builder(_activity)
                 .SetTitle("Salida Pendiente")
                 .SetMessage(mensaje)
                 .SetPositiveButton("Continuar", async (s, e) =>
@@ -1545,7 +1546,6 @@ namespace RFIDTrackBin.fragment
                     _activity.baseReader.RfidUhf.AlgorithmType = AlgorithmType.DynamicQ;
                     _activity.baseReader.RfidUhf.ToggleTarget = true;
                     _activity.baseReader.RfidUhf.ContinuousMode = true;
-                    Log.Debug(TAG, "Configuración del lector aplicada correctamente");
                 }
             }
             catch (ReaderException e)

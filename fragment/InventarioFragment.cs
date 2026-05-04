@@ -1330,7 +1330,6 @@ WHERE IdClaveTag = @IdClaveTag";
                     _activity.baseReader.RfidUhf.AlgorithmType = AlgorithmType.DynamicQ;
                     _activity.baseReader.RfidUhf.ToggleTarget = true;
                     _activity.baseReader.RfidUhf.ContinuousMode = true;
-                    Log.Debug(TAG, "Configuración del lector aplicada correctamente");
                 }
             }
             catch (ReaderException e)

@@ -35,6 +35,9 @@ using System.Linq;
 using System.Runtime.Remoting.Metadata.W3cXsd2001;
 using System.Text;
 using System.Threading.Tasks;
+using AppCompatActivity = AndroidX.AppCompat.App.AppCompatActivity;
+using BottomNavigationView = Google.Android.Material.BottomNavigation.BottomNavigationView;
+using FloatingActionButton = Google.Android.Material.FloatingActionButton.FloatingActionButton;
 using Toolbar = AndroidX.AppCompat.Widget.Toolbar;
 
 namespace RFIDTrackBin

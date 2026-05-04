@@ -1,8 +1,6 @@
-﻿using Android.App;
-using Android.Content;
+﻿using Android.Content;
 using Android.Media;
 using Android.OS;
-using Android.Runtime;
 using Android.Util;
 using Android.Views;
 using Android.Widget;
@@ -21,7 +19,6 @@ using Com.Unitech.Lib.Uhf.Types;
 using Com.Unitech.Lib.Util.Diagnotics;
 using Google.Android.Material.FloatingActionButton;
 using RFIDTrackBin.enums;
-using RFIDTrackBin.Modal;
 using RFIDTrackBin.Model;
 using System;
 using System.Collections.Concurrent;
@@ -42,8 +39,8 @@ namespace RFIDTrackBin.fragment
         static string systemUssTriggerScan = "unitech.scanservice.software_scankey";
         static string ExtraScan = "scan";
 
-        public int MAX_MASK = 2;
-        private int NIBLE_SIZE = 4;
+        private const int MAX_MASK = 2;
+        private const int NIBLE_SIZE = 4;
 
         bool accessTagResult;
         private bool _isFindTag = false;
@@ -98,6 +95,9 @@ namespace RFIDTrackBin.fragment
 
         private FloatingActionButton fabScanManual;
         private bool _isScanManualActive = false;
+        private bool _isModoValidacionActivo = false;
+        private const int POWER_VALIDACION = 11;
+        private int _powerOriginal = 30;
 
         public override View OnCreateView(LayoutInflater inflater, ViewGroup container, Bundle savedInstanceState)
         {
@@ -116,10 +116,54 @@ namespace RFIDTrackBin.fragment
         public override void OnViewCreated(View view, Bundle savedInstanceState)
         {
             base.OnViewCreated(view, savedInstanceState);
-            InitializeAsync(view);
+            _ = InitializeSafeAsync(view);
         }
 
-        private async void InitializeAsync(View view)
+        private async Task InitializeSafeAsync(View view)
+        {
+            try
+            {
+                bool ok = await MainActivity.BtHelper.EnsureBluetoothAsync();
+                if (!ok)
+                {
+                    Toast.MakeText(Activity, "Bluetooth es obligatorio para el inventario.", ToastLength.Short).Show();
+                    return;
+                }
+
+                FindViews(view);
+                InitializeSoundPool();
+
+                HasOptionsMenu = true;
+
+                mReceiver = new MainReceiver(this);
+                IntentFilter filter = new IntentFilter();
+                filter.AddAction(MainReceiver.rfidGunPressed);
+                filter.AddAction(MainReceiver.rfidGunReleased);
+                _activity.RegisterReceiver(mReceiver, filter);
+
+                adapter = new myGVitemAdapter(_activity, tagEPCList);
+                gvObject.Adapter = adapter;
+
+                _activity.EnableNavigationItems(Resource.Id.navigation_entradas, Resource.Id.navigation_salidas);
+
+                progressBar = view.FindViewById<ProgressBar>(Resource.Id.progressBarGuardar);
+                loadingOverlay = view.FindViewById<RelativeLayout>(Resource.Id.loadingOverlay);
+
+                // Configurar FAB según configuración
+                if (MainActivity.UseManualScan)
+                    fabScanManual.Visibility = ViewStates.Visible;
+                else
+                    fabScanManual.Visibility = ViewStates.Gone;
+
+                fabScanManual.Click += FabScanManual_Click;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(TAG, $"Error en InitializeSafeAsync: {ex.Message}");
+                MainActivity.ShowToast("Error al inicializar fragmento");
+            }
+        }
+        private async void InitializeAsynclegacy(View view)
         {
             try
             {
@@ -248,7 +292,7 @@ namespace RFIDTrackBin.fragment
                         soundPool = new SoundPool(5, Stream.Music, 0);
                     }
 
-                    beepSoundId = soundPool.Load(_activity, Resource.Drawable.beep, 1);
+                    beepSoundId = soundPool.Load(_activity, Resource.Raw.beep, 1);
                 }
                 catch (Exception ex)
                 {
@@ -265,19 +309,6 @@ namespace RFIDTrackBin.fragment
 
             _activity?.OcultarElementosNavegacion();
             _activity.currentRfidFragment = this;
-
-            if (mReceiver != null)
-            {
-                try
-                {
-                    IntentFilter filter = new IntentFilter();
-                    filter.AddAction(MainReceiver.rfidGunPressed);
-                    filter.AddAction(MainReceiver.rfidGunReleased);
-                    _activity.RegisterReceiver(mReceiver, filter);
-                }
-                catch (Java.Lang.IllegalArgumentException) { }
-                catch (Exception ex) { Log.Warn(TAG, $"RegisterReceiver: {ex.Message}"); }
-            }
 
             if (_activity?.baseReader != null &&
                 _activity.baseReader.State == ConnectState.Connected &&
@@ -402,6 +433,9 @@ namespace RFIDTrackBin.fragment
             inflater.Inflate(Resource.Menu.menu_verificacion, menu);
             _menu = menu;
             menu.FindItem(Resource.Id.inicio_verificacion).SetEnabled(true);
+
+            ActualizarEstadoMenuValidacion();
+
             base.OnCreateOptionsMenu(menu, inflater);
         }
 
@@ -412,6 +446,9 @@ namespace RFIDTrackBin.fragment
                 case Resource.Id.inicio_verificacion:
                     _menu?.FindItem(Resource.Id.inicio_verificacion)?.SetEnabled(true);
                     ClearGridView();
+                    return true;
+                case Resource.Id.modo_validacion:
+                    ToggleModoValidacion();
                     return true;
                 default:
                     return base.OnOptionsItemSelected(item);
@@ -616,6 +653,7 @@ namespace RFIDTrackBin.fragment
             // Validación async sin bloquear
             _ = ProcessTagAsync(tag, rssi);
         }
+
 
         private async Task ProcessTagAsync(string tag, float rssi)
         {
