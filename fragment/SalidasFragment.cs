@@ -1406,7 +1406,18 @@ namespace RFIDTrackBin.fragment
                     if (sprRancho.SelectedItemPosition <= 0) { MainActivity.ShowToast("Seleccione un Rancho."); return; }
                     if (sprTabla.SelectedItemPosition <= 0) { MainActivity.ShowToast("Seleccione una Tabla."); return; }
 
-                    await ActualizarCatalogoTagsAsync(snapshot, "S", _activity.usuario, null, prov_clave, rch_clave, int.Parse(_activity.idUnidadNegocio), 24, "E", null);
+                    await ActualizarCatalogoTagsAsync(
+                        snapshot, 
+                        "S", 
+                        _activity.usuario, 
+                        null, 
+                        prov_clave, 
+                        rch_clave, 
+                        int.Parse(_activity.idUnidadNegocio), 
+                        24, 
+                        "E", 
+                        null,
+                        AppSettings.ModoPrueba);
                 }
 
                 totalAcumuladoINT += registrosInsertados;
@@ -1426,9 +1437,21 @@ namespace RFIDTrackBin.fragment
             }
         }
 
-        public async Task<int> ActualizarCatalogoTagsAsync(List<TagLeido> tags, string tipoMovimiento, string usuario, string invArea, string provClave, string ranClave, int? idUnidadNegocio, int? idUbicacion, string tipoUbicacion, int? idFlete)
+        public async Task<int> ActualizarCatalogoTagsAsync(
+    List<TagLeido> tags,
+    string tipoMovimiento,
+    string usuario,
+    string invArea,
+    string provClave,
+    string ranClave,
+    int? idUnidadNegocio,
+    int? idUbicacion,
+    string tipoUbicacion,
+    int? idFlete,
+    bool modoPrueba = false)
         {
-            if (tags == null || tags.Count == 0) return 0;
+            if (tags == null || tags.Count == 0)
+                return 0;
 
             const string query = @"
         UPDATE Tb_RFID_Catalogo
@@ -1436,71 +1459,80 @@ namespace RFIDTrackBin.fragment
             FechaUltimoMovimiento = @Fecha,
             Tipo = @TipoMovimiento,
             Usuario = @Usuario,
-            InvArea = CASE WHEN @TipoMovimiento = 'I' THEN @InvArea ELSE InvArea END,
-            Prov_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @ProvClave ELSE Prov_Clave END,
-            Ran_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @RanClave ELSE Ran_Clave END,
+
+            InvArea = CASE WHEN @TipoMovimiento = 'I' THEN @InvArea ELSE NULL END,
+            Prov_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @ProvClave ELSE NULL END,
+            Ran_Clave = CASE WHEN @TipoMovimiento IN ('E','S') THEN @RanClave ELSE NULL END,
+
             IdUnidadNegocioActual = @IdUnidadNegocio,
             IdUbicacionActual = @IdUbicacion,
             TipoUbicacion = @TipoUbicacion,
-            id_flete = CASE WHEN @TipoMovimiento = 'E' THEN @IdFlete ELSE id_flete END
+
+            id_flete = CASE WHEN @TipoMovimiento = 'E' THEN @IdFlete ELSE NULL END
         WHERE IdClaveTag = @IdClaveTag";
 
             try
             {
-                return await Task.Run(() =>
+                int actualizados = 0;
+
+                using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
+                await conn.OpenAsync();
+
+                using SqlTransaction transaction = conn.BeginTransaction();
+
+                try
                 {
-                    int actualizados = 0;
+                    using SqlCommand cmd = new SqlCommand(query, conn, transaction);
 
-                    using SqlConnection conn = new SqlConnection(MainActivity.cadenaConexion);
-                    conn.Open();
+                    cmd.Parameters.Add("@Fecha", SqlDbType.DateTime);
+                    cmd.Parameters.Add("@TipoMovimiento", SqlDbType.Char);
+                    cmd.Parameters.Add("@Usuario", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@InvArea", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@ProvClave", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@RanClave", SqlDbType.VarChar);
+                    cmd.Parameters.Add("@IdUnidadNegocio", SqlDbType.Int);
+                    cmd.Parameters.Add("@IdUbicacion", SqlDbType.Int);
+                    cmd.Parameters.Add("@TipoUbicacion", SqlDbType.Char);
+                    cmd.Parameters.Add("@IdFlete", SqlDbType.Int);
+                    cmd.Parameters.Add("@IdClaveTag", SqlDbType.VarChar);
 
-                    // ✅ TRANSACCIÓN AGREGADA
-                    using SqlTransaction transaction = conn.BeginTransaction();
-                    try
+                    var snapshot = tags
+                        .GroupBy(t => t.EPC)
+                        .Select(g => g.First())
+                        .ToList();
+
+                    foreach (var tag in snapshot)
                     {
-                        using SqlCommand cmd = new SqlCommand(query, conn, transaction);
+                        cmd.Parameters["@Fecha"].Value = tag.FechaLectura;
+                        cmd.Parameters["@TipoMovimiento"].Value = tipoMovimiento;
+                        cmd.Parameters["@Usuario"].Value = usuario;
 
-                        cmd.Parameters.Add("@Fecha", SqlDbType.DateTime);
-                        cmd.Parameters.Add("@TipoMovimiento", SqlDbType.Char);
-                        cmd.Parameters.Add("@Usuario", SqlDbType.VarChar);
-                        cmd.Parameters.Add("@InvArea", SqlDbType.VarChar);
-                        cmd.Parameters.Add("@ProvClave", SqlDbType.VarChar);
-                        cmd.Parameters.Add("@RanClave", SqlDbType.VarChar);
-                        cmd.Parameters.Add("@IdUnidadNegocio", SqlDbType.Int);
-                        cmd.Parameters.Add("@IdUbicacion", SqlDbType.Int);
-                        cmd.Parameters.Add("@TipoUbicacion", SqlDbType.Char);
-                        cmd.Parameters.Add("@IdFlete", SqlDbType.Int);
-                        cmd.Parameters.Add("@IdClaveTag", SqlDbType.VarChar);
+                        cmd.Parameters["@InvArea"].Value = (object?)invArea ?? DBNull.Value;
+                        cmd.Parameters["@ProvClave"].Value = (object?)provClave ?? DBNull.Value;
+                        cmd.Parameters["@RanClave"].Value = (object?)ranClave ?? DBNull.Value;
 
-                        // ✅ Duplicados en memoria
-                        var snapshot = tags.GroupBy(t => t.EPC).Select(g => g.First()).ToList();
+                        cmd.Parameters["@IdUnidadNegocio"].Value = (object?)idUnidadNegocio ?? DBNull.Value;
+                        cmd.Parameters["@IdUbicacion"].Value = (object?)idUbicacion ?? DBNull.Value;
+                        cmd.Parameters["@TipoUbicacion"].Value = (object?)tipoUbicacion ?? DBNull.Value;
 
-                        foreach (var tag in snapshot)
-                        {
-                            cmd.Parameters["@Fecha"].Value = tag.FechaLectura;
-                            cmd.Parameters["@TipoMovimiento"].Value = tipoMovimiento;
-                            cmd.Parameters["@Usuario"].Value = usuario;
-                            cmd.Parameters["@InvArea"].Value = invArea ?? (object)DBNull.Value;
-                            cmd.Parameters["@ProvClave"].Value = provClave ?? (object)DBNull.Value;
-                            cmd.Parameters["@RanClave"].Value = ranClave ?? (object)DBNull.Value;
-                            cmd.Parameters["@IdUnidadNegocio"].Value = idUnidadNegocio ?? (object)DBNull.Value;
-                            cmd.Parameters["@IdUbicacion"].Value = idUbicacion ?? (object)DBNull.Value;
-                            cmd.Parameters["@TipoUbicacion"].Value = tipoUbicacion ?? (object)DBNull.Value;
-                            cmd.Parameters["@IdFlete"].Value = idFlete ?? (object)DBNull.Value;
-                            cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
+                        cmd.Parameters["@IdFlete"].Value = (object?)idFlete ?? DBNull.Value;
+                        cmd.Parameters["@IdClaveTag"].Value = tag.EPC;
 
-                            actualizados += cmd.ExecuteNonQuery();
-                        }
-
-                        transaction.Commit(); // ✅ Confirmar todo o nada
-                        return actualizados;
+                        actualizados += await cmd.ExecuteNonQueryAsync();
                     }
-                    catch
-                    {
-                        transaction.Rollback(); // ✅ Deshacer si cualquier tag falla
-                        throw;
-                    }
-                });
+
+                    if (modoPrueba)
+                        transaction.Rollback();
+                    else
+                        transaction.Commit();
+
+                    return actualizados;
+                }
+                catch
+                {
+                    transaction.Rollback();
+                    throw;
+                }
             }
             catch (Exception ex)
             {

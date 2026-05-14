@@ -433,9 +433,6 @@ namespace RFIDTrackBin.fragment
             inflater.Inflate(Resource.Menu.menu_verificacion, menu);
             _menu = menu;
             menu.FindItem(Resource.Id.inicio_verificacion).SetEnabled(true);
-
-            ActualizarEstadoMenuValidacion();
-
             base.OnCreateOptionsMenu(menu, inflater);
         }
 
@@ -446,9 +443,6 @@ namespace RFIDTrackBin.fragment
                 case Resource.Id.inicio_verificacion:
                     _menu?.FindItem(Resource.Id.inicio_verificacion)?.SetEnabled(true);
                     ClearGridView();
-                    return true;
-                case Resource.Id.modo_validacion:
-                    ToggleModoValidacion();
                     return true;
                 default:
                     return base.OnOptionsItemSelected(item);
