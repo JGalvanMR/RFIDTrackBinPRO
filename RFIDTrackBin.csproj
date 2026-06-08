@@ -5,7 +5,7 @@
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <ProductVersion>8.0.30703</ProductVersion>
     <SchemaVersion>2.0</SchemaVersion>
-	  <LangVersion>Latest</LangVersion>
+    <LangVersion>Latest</LangVersion>
     <ProjectGuid>{7B79069D-E785-4334-8D1A-78C66875CDC9}</ProjectGuid>
     <ProjectTypeGuids>{EFBA0AD7-5A72-4C68-AF49-83D382785DCF};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
     <TemplateGuid>{e0dc9abc-7303-488b-8af1-61e341bd2a32}</TemplateGuid>
@@ -87,6 +87,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="AppLogger.cs" />
+    <Compile Include="AppSettings.cs" />
     <Compile Include="enums\FragmentType.cs" />
     <Compile Include="enums\HandlerMsg.cs" />
     <Compile Include="enums\IDType.cs" />
@@ -184,7 +185,16 @@
     <PackageReference Include="Xam.Plugin.Media">
       <Version>6.0.2</Version>
     </PackageReference>
+    <PackageReference Include="Xamarin.Android.Support.Design">
+      <Version>28.0.0.3</Version>
+    </PackageReference>
+    <PackageReference Include="Xamarin.Android.Support.v7.AppCompat">
+      <Version>28.0.0.3</Version>
+    </PackageReference>
     <PackageReference Include="Xamarin.AndroidX.AppCompat" Version="1.2.0.5" />
+    <PackageReference Include="Xamarin.AndroidX.Lifecycle.LiveData">
+      <Version>2.2.0.3</Version>
+    </PackageReference>
     <PackageReference Include="Xamarin.Google.Android.Material" Version="1.0.0.1" />
     <PackageReference Include="Xamarin.Essentials" Version="1.6.1" />
     <PackageReference Include="Xamarin.Essentials" Version="1.6.1" />
@@ -384,7 +394,9 @@
     <AndroidResource Include="Resources\layout\FletesPendientes.xml">
       <SubType>Designer</SubType>
     </AndroidResource>
+    <AndroidResource Include="Resources\Raw\beep.mp3" />
   </ItemGroup>
+  <ItemGroup />
   <Import Project="$(MSBuildExtensionsPath)\Xamarin\Android\Xamarin.Android.CSharp.targets" />
   <!-- To modify your build process, add your task inside one of the targets below and uncomment it.
     Other similar extension points exist, see Microsoft.Common.targets.

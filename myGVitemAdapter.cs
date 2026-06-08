@@ -1,6 +1,7 @@
 ﻿using Android.App;
 using Android.Views;
 using Android.Widget;
+using Android.Graphics;
 using RFIDTrackBin.Model;
 using System;
 using System.Collections.Generic;
