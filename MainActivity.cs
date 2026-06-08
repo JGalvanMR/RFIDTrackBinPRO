@@ -51,7 +51,7 @@ namespace RFIDTrackBin
         BottomNavigationView.IOnNavigationItemSelectedListener
     {
         public static string cadenaConexion =
-            "Persist Security Info=False;user id=sa; password=Gabira1;" +
+            "Persist Security Info=False;user id=sa; password=Gabira2026$;" +
             "Initial Catalog = GAB_Irapuato; server=tcp:189.206.160.206,2352;" +
             " MultipleActiveResultSets=true; Connect Timeout = 0";
 
