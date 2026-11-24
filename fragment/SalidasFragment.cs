@@ -338,7 +338,7 @@ namespace RFIDTrackBin.fragment
 
             Activity.RunOnUiThread(() =>
             {
-                var layout = new LinearLayout(_activity) { Orientation = Orientation.Vertical };
+                var layout = new LinearLayout(_activity) { Orientation = Android.Widget.Orientation.Vertical };
                 layout.SetPadding(48, 24, 48, 0);
 
                 var txtChofer = new EditText(_activity) { Hint = "Chofer" };
