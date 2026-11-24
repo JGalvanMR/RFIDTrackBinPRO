@@ -18,5 +18,12 @@ namespace RFIDTrackBin
 #else
         public static bool ModoPrueba => false; // En Release SIEMPRE guarda
 #endif
+
+        // ── Salida de envases (SistemaEnvases) ─────────────────────────────
+        // Cada bin leído en una salida RFID equivale a 1 caja del envase/producto
+        // configurado aquí. Deben existir en tb_cat_envases / tb_cat_producto.
+        // 80 = CAJONES ARMABLES (tb_cat_envases); "vacios" = producto creado en tb_cat_producto.
+        public const string EnvaseSalidaClave = "80";
+        public const string ProductoSalidaClave = "vacios";
     }
 }

@@ -331,13 +331,177 @@ namespace RFIDTrackBin.fragment
             }
         }
 
+        /// <summary>Pide chofer y operador. Devuelve null si el usuario cancela.</summary>
+        private Task<(string Chofer, string Operador)?> PedirChoferOperadorAsync()
+        {
+            var tcs = new TaskCompletionSource<(string, string)?>();
+
+            Activity.RunOnUiThread(() =>
+            {
+                var layout = new LinearLayout(_activity) { Orientation = Orientation.Vertical };
+                layout.SetPadding(48, 24, 48, 0);
+
+                var txtChofer = new EditText(_activity) { Hint = "Chofer" };
+                var txtOperador = new EditText(_activity) { Hint = "Operador" };
+                layout.AddView(txtChofer);
+                layout.AddView(txtOperador);
+
+                var dialog = new Android.App.AlertDialog.Builder(_activity)
+                    .SetTitle("Salida de envases")
+                    .SetView(layout)
+                    .SetPositiveButton("Aceptar", (IDialogInterfaceOnClickListener)null)
+                    .SetNegativeButton("Cancelar", (s, e) => tcs.TrySetResult(null))
+                    .SetCancelable(false)
+                    .Create();
+
+                dialog.Show();
+
+                // Sobrescribir el click para validar sin cerrar el diálogo
+                dialog.GetButton((int)DialogButtonType.Positive).Click += (s, e) =>
+                {
+                    string chofer = txtChofer.Text?.Trim() ?? "";
+                    string operador = txtOperador.Text?.Trim() ?? "";
+                    if (chofer.Length == 0) { txtChofer.Error = "Requerido"; return; }
+                    if (operador.Length == 0) { txtOperador.Error = "Requerido"; return; }
+                    dialog.Dismiss();
+                    tcs.TrySetResult((chofer, operador));
+                };
+            });
+
+            return tcs.Task;
+        }
+
+        /// <summary>
+        /// Replica BtnSplitPed_Click de SistemaEnvases: encabezado + detalle en
+        /// TB_SALIDAS_ENVASES / TB_DETSALIDAS_ENVASES y actualización de inventarios.
+        /// Cantidad = bins leídos en la salida (Tb_RFID_Det). Corre dentro de la
+        /// transacción recibida. Devuelve el folio, o 0 si no había bins.
+        /// </summary>
+        private static int GenerarSalidaEnvases(
+            SqlConnection conn, SqlTransaction tx, int idConse,
+            string provClave, string provNombre,
+            string rchClave, string rchNombre,
+            string tblClave, string tblNombre,
+            string chofer, string operador, string usuario)
+        {
+            string envClave = AppSettings.EnvaseSalidaClave;
+            string prodClave = AppSettings.ProductoSalidaClave;
+            if (string.IsNullOrWhiteSpace(envClave) || string.IsNullOrWhiteSpace(prodClave))
+                throw new InvalidOperationException(
+                    "No están configuradas las claves de envase/producto para la salida de envases (AppSettings).");
+
+            if (rchNombre == "Sin Ranchos Disponibles") rchNombre = "";
+            if (tblNombre == "Sin Tablas Disponibles") tblNombre = "";
+
+            int cantidad;
+            using (var cmd = new SqlCommand("SELECT COUNT(*) FROM Tb_RFID_Det WHERE IdConseInv = @Id", conn, tx))
+            {
+                cmd.Parameters.AddWithValue("@Id", idConse);
+                cantidad = Convert.ToInt32(cmd.ExecuteScalar());
+            }
+            if (cantidad <= 0) return 0;
+
+            string envNombre, prodNombre;
+            using (var cmd = new SqlCommand("SELECT TOP 1 RTRIM(env_nombre) FROM tb_cat_envases WHERE env_clave = @C", conn, tx))
+            {
+                cmd.Parameters.AddWithValue("@C", envClave);
+                envNombre = cmd.ExecuteScalar()?.ToString()
+                    ?? throw new InvalidOperationException($"El envase '{envClave}' no existe en tb_cat_envases.");
+            }
+            using (var cmd = new SqlCommand("SELECT TOP 1 RTRIM(prod_nombre) FROM tb_cat_producto WHERE prod_clave = @C", conn, tx))
+            {
+                cmd.Parameters.AddWithValue("@C", prodClave);
+                prodNombre = cmd.ExecuteScalar()?.ToString()
+                    ?? throw new InvalidOperationException($"El producto '{prodClave}' no existe en tb_cat_producto.");
+            }
+
+            DateTime ahora;
+            using (var cmd = new SqlCommand("SELECT SYSDATETIME()", conn, tx))
+                ahora = Convert.ToDateTime(cmd.ExecuteScalar());
+            DateTime fechaSalida = ahora.Date;
+
+            int folio;
+            using (var cmd = new SqlCommand(@"
+                INSERT INTO TB_SALIDAS_ENVASES(FECHA, PROV_CLAVE, PROV_NOMBRE, RCH_CLAVE, RCH_NOMBRE,
+                    TBL_CLAVE, TBL_NOMBRE, NOM_CHOFER, NOM_OPERADOR, SAL_STATUS, FECHA_GUARDADO)
+                VALUES(@Fecha, @ProvClave, @ProvNombre, @RchClave, @RchNombre,
+                    @TblClave, @TblNombre, @Chofer, @Operador, 'T', @FechaGuardado);
+                SELECT CAST(SCOPE_IDENTITY() AS INT);", conn, tx))
+            {
+                cmd.Parameters.AddWithValue("@Fecha", fechaSalida);
+                cmd.Parameters.AddWithValue("@ProvClave", provClave ?? "");
+                cmd.Parameters.AddWithValue("@ProvNombre", provNombre ?? "");
+                cmd.Parameters.AddWithValue("@RchClave", rchClave ?? "");
+                cmd.Parameters.AddWithValue("@RchNombre", rchNombre ?? "");
+                cmd.Parameters.AddWithValue("@TblClave", tblClave ?? "");
+                cmd.Parameters.AddWithValue("@TblNombre", tblNombre ?? "");
+                cmd.Parameters.AddWithValue("@Chofer", chofer);
+                cmd.Parameters.AddWithValue("@Operador", operador);
+                cmd.Parameters.AddWithValue("@FechaGuardado", ahora.ToString("dd/MM/yyyy HH:mm:ss"));
+                folio = Convert.ToInt32(cmd.ExecuteScalar());
+            }
+
+            using (var cmd = new SqlCommand(@"
+                INSERT INTO TB_DETSALIDAS_ENVASES(FOLIO, ENV_CLAVE, ENV_NOMBRE, CANTIDAD, PROD_CLAVE, PROD_NOMBRE)
+                VALUES(@Folio, @EnvClave, @EnvNombre, @Cantidad, @ProdClave, @ProdNombre)", conn, tx))
+            {
+                cmd.Parameters.AddWithValue("@Folio", folio);
+                cmd.Parameters.AddWithValue("@EnvClave", envClave);
+                cmd.Parameters.AddWithValue("@EnvNombre", envNombre);
+                cmd.Parameters.AddWithValue("@Cantidad", cantidad);
+                cmd.Parameters.AddWithValue("@ProdClave", prodClave);
+                cmd.Parameters.AddWithValue("@ProdNombre", prodNombre);
+                cmd.ExecuteNonQuery();
+            }
+
+            void Exec(string sql, params (string, object)[] ps)
+            {
+                using var cmd = new SqlCommand(sql, conn, tx);
+                foreach (var (n, v) in ps) cmd.Parameters.AddWithValue(n, v);
+                cmd.ExecuteNonQuery();
+            }
+
+            Exec(@"UPDATE TB_MSTR_ENVASES SET cant_salidas = (cant_salidas + @Cant)
+                   WHERE prov_clave = @P AND rch_clave = @R AND tbl_clave = @T AND env_clave = @E",
+                ("@Cant", cantidad), ("@P", provClave ?? ""), ("@R", rchClave ?? ""), ("@T", tblClave ?? ""), ("@E", envClave));
+            Exec("UPDATE TB_MSTR_INV_ENVASES SET ENV_INV_CANT = (ENV_INV_CANT - @Cant) WHERE ENV_CLAVE = @E",
+                ("@Cant", cantidad), ("@E", envClave));
+            Exec("UPDATE TB_MSTR_INV_ENVASES_dos SET ENV_SAL_CANT = (ENV_SAL_CANT + @Cant) WHERE ENV_CLAVE = @E AND ENV_FECHA = @F",
+                ("@Cant", cantidad), ("@E", envClave), ("@F", fechaSalida));
+            Exec("UPDATE TB_MSTR_INV_ENVASES_sin_corte SET ENV_SAL_CANT = (ENV_SAL_CANT + @Cant) WHERE ENV_CLAVE = @E AND ENV_FECHA = @F",
+                ("@Cant", cantidad), ("@E", envClave), ("@F", fechaSalida));
+
+            Exec(@"INSERT INTO tb_registro_movimientos
+                   (fecha, nom_compu, nom_usu, tipo_mov, op_clave, folio, detalle, sistema, mov_folio)
+                   VALUES(@Fecha, @Maq, @Usu, 'SALIDA', '2.18', @Folio,
+                          @Det, 'SISGAB', @Folio)",
+                ("@Fecha", DateTime.Now), ("@Maq", Android.OS.Build.Model ?? "RFID"),
+                ("@Usu", usuario ?? ""), ("@Folio", folio),
+                ("@Det", $"INSERCCION DE SALIDA FECHA {fechaSalida:dd/MM/yyyy} (RFID #{idConse})"));
+
+            return folio;
+        }
+
         private async Task FinalizarSalidaAsync(int idConse)
         {
+            var datos = await PedirChoferOperadorAsync();
+            if (datos == null) return; // el usuario canceló; la salida sigue abierta
+            string chofer = datos.Value.Chofer;
+            string operador = datos.Value.Operador;
+
+            // Capturar antes de que la UI limpie los campos
+            string provC = prov_clave, provN = prov_nombre;
+            string rchC = rch_clave, rchN = rch_nombre;
+            string tblC = tbl_clave, tblN = tbl_nombre;
+            string usuario = _activity.usuario;
+
             Activity.RunOnUiThread(() =>
             {
                 loadingOverlay.Visibility = ViewStates.Visible;
                 btnGuardar.Enabled = false;
             });
+
+            int folioEnvases = 0;
 
             try
             {
@@ -373,6 +537,13 @@ namespace RFIDTrackBin.fragment
                             cmdCat.Parameters.AddWithValue("@IdConseInv", idConse);
                             cmdCat.ExecuteNonQuery();
                         }
+
+                        // 3. Salida de envases (SistemaEnvases) en la misma transacción.
+                        //    En modo prueba se revierte solo este bloque con un savepoint.
+                        if (AppSettings.ModoPrueba) transaction.Save("sp_envases");
+                        folioEnvases = GenerarSalidaEnvases(conn, transaction, idConse,
+                            provC, provN, rchC, rchN, tblC, tblN, chofer, operador, usuario);
+                        if (AppSettings.ModoPrueba) transaction.Rollback("sp_envases");
 
                         transaction.Commit();
                     }
@@ -412,7 +583,12 @@ namespace RFIDTrackBin.fragment
                     txtTotalAcumulado.Text = "0";
                     loadingOverlay.Visibility = ViewStates.Gone;
 
-                    Toast.MakeText(Activity, "Fin de Salida...", ToastLength.Long).Show();
+                    string msg = AppSettings.ModoPrueba
+                        ? "Fin de Salida (modo prueba: envases no guardados)"
+                        : folioEnvases > 0
+                            ? $"Fin de Salida. Salida de envases folio {folioEnvases}"
+                            : "Fin de Salida...";
+                    Toast.MakeText(Activity, msg, ToastLength.Long).Show();
                 });
             }
             catch (Exception ex)
