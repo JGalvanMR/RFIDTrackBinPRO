@@ -482,6 +482,48 @@ namespace RFIDTrackBin.fragment
             return folio;
         }
 
+        /// <summary>Muestra el folio de la salida de envases de forma destacada.</summary>
+        private void MostrarFolioEnvases(int folio)
+        {
+            var layout = new LinearLayout(_activity) { Orientation = Android.Widget.Orientation.Vertical };
+            layout.SetPadding(48, 32, 48, 16);
+            layout.SetGravity(GravityFlags.CenterHorizontal);
+
+            string titulo, leyenda, valor;
+            if (AppSettings.ModoPrueba)
+            {
+                titulo = "Salida finalizada";
+                leyenda = "Modo prueba: la salida de envases no se guardó.";
+                valor = "—";
+            }
+            else if (folio > 0)
+            {
+                titulo = "Salida finalizada";
+                leyenda = "Folio de salida de envases";
+                valor = folio.ToString();
+            }
+            else
+            {
+                titulo = "Salida finalizada";
+                leyenda = "No se generó salida de envases (sin bins leídos).";
+                valor = "—";
+            }
+
+            var lbl = new TextView(_activity) { Text = leyenda, TextSize = 16f, Gravity = GravityFlags.Center };
+            var num = new TextView(_activity) { Text = valor, TextSize = 44f, Gravity = GravityFlags.Center };
+            num.SetTypeface(num.Typeface, Android.Graphics.TypefaceStyle.Bold);
+            num.SetTextIsSelectable(true);
+            layout.AddView(lbl);
+            layout.AddView(num);
+
+            new Android.App.AlertDialog.Builder(_activity)
+                .SetTitle(titulo)
+                .SetView(layout)
+                .SetPositiveButton("Aceptar", (s, e) => { })
+                .SetCancelable(false)
+                .Show();
+        }
+
         private async Task FinalizarSalidaAsync(int idConse)
         {
             var datos = await PedirChoferOperadorAsync();
@@ -583,12 +625,7 @@ namespace RFIDTrackBin.fragment
                     txtTotalAcumulado.Text = "0";
                     loadingOverlay.Visibility = ViewStates.Gone;
 
-                    string msg = AppSettings.ModoPrueba
-                        ? "Fin de Salida (modo prueba: envases no guardados)"
-                        : folioEnvases > 0
-                            ? $"Fin de Salida. Salida de envases folio {folioEnvases}"
-                            : "Fin de Salida...";
-                    Toast.MakeText(Activity, msg, ToastLength.Long).Show();
+                    MostrarFolioEnvases(folioEnvases);
                 });
             }
             catch (Exception ex)
@@ -612,6 +649,13 @@ namespace RFIDTrackBin.fragment
         /// </summary>
         private async Task IniciarSalidaAsync()
         {
+            if (string.IsNullOrWhiteSpace(prov_clave) || string.IsNullOrWhiteSpace(rch_clave) || string.IsNullOrWhiteSpace(tbl_clave))
+            {
+                MainActivity.ShowDialog("Datos incompletos",
+                    "No se pudo determinar la clave de proveedor, rancho o tabla. Vuelva a seleccionarlos.");
+                return;
+            }
+
             int id = await InsertarSalidaAsync(
                 tipoMovimiento,
                 ((MainActivity)Activity).usuario,
@@ -1488,7 +1532,13 @@ namespace RFIDTrackBin.fragment
 
                 Spinner spinner = (Spinner)sender;
                 tbl_nombre = spinner.GetItemAtPosition(e.Position)?.ToString()?.Trim() ?? "";
-                tbl_clave = getTbl_Clave(tbl_nombre);
+                // Resolver por posición (no por nombre): hay nombres de tabla duplicados
+                // dentro de un mismo rancho (p. ej. "7 HERMANOS -6" = claves 01 y 76).
+                int idxTabla = e.Position - 1;
+                tbl_clave = (idxTabla >= 0 && idxTabla < vwTablas.Rows.Count)
+                    ? vwTablas.Rows[idxTabla]["tbl_clave"].ToString().Trim()
+                    : getTbl_Clave(tbl_nombre);
+                Log.Debug(TAG, $"Tabla seleccionada: '{tbl_nombre}' clave='{tbl_clave}'");
                 _menu?.FindItem(Resource.Id.inicio_salidas)?.SetEnabled(true);
             }
             catch (Exception ex)
