@@ -1142,6 +1142,7 @@ namespace RFIDTrackBin.fragment
 
                     int indice = sprAreas.SelectedItemPosition - 1;
 
+                    bool modoprueba = false;
                     await ActualizarCatalogoTagsAsync(
                         snapshot,
                         "I",
@@ -1153,7 +1154,7 @@ namespace RFIDTrackBin.fragment
                         int.Parse(areas.Rows[indice]["IdArea"].ToString()),
                         "A",
                         null,
-                        AppSettings.ModoPrueba // 🔥 modo prueba (cambiar a false en producción)
+                        modoprueba // 🔥 modo prueba (cambiar a false en producción)
                     );
                 }
 
