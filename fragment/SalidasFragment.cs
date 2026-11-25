@@ -1632,18 +1632,19 @@ namespace RFIDTrackBin.fragment
                     if (sprRancho.SelectedItemPosition <= 0) { MainActivity.ShowToast("Seleccione un Rancho."); return; }
                     if (sprTabla.SelectedItemPosition <= 0) { MainActivity.ShowToast("Seleccione una Tabla."); return; }
 
+                    bool modoprueba = false;
                     await ActualizarCatalogoTagsAsync(
-                        snapshot, 
-                        "S", 
-                        _activity.usuario, 
-                        null, 
-                        prov_clave, 
-                        rch_clave, 
-                        int.Parse(_activity.idUnidadNegocio), 
-                        24, 
-                        "E", 
+                        snapshot,
+                        "S",
+                        _activity.usuario,
                         null,
-                        AppSettings.ModoPrueba);
+                        prov_clave,
+                        rch_clave,
+                        int.Parse(_activity.idUnidadNegocio),
+                        24,
+                        "E",
+                        null,
+                        modoprueba);
                 }
 
                 totalAcumuladoINT += registrosInsertados;
